@@ -322,7 +322,7 @@ function DisplayManager:drawStatus()
     local w, h = self.monitor.getSize()
     local statusY = 3 + math.ceil(#self.displayItems / self.column)
 
-    -- Empty slots
+    -- Empty slots display
     local slotColor = colors.cyan
     if self.emptySlots <= 0 then
         slotColor = colors.purple
@@ -347,10 +347,17 @@ function DisplayManager:drawStatus()
     self.monitor.setTextColor(slotColor)
     self.monitor.write(slotText)
 
-    -- Chest status
+    -- Chest status - Fixed logic
     local chestColor = colors.green
-    if self.partialChests + self.fullChests > 0 and self.fullChests > 0 then
-        chestColor = colors.purple
+    local totalChests = self.fullChests + self.partialChests
+
+    -- Only show EMPTY if we actually have storage chests but they're all empty
+    local hasStorageChests = (self.fullChests + self.partialChests > 0) or (self.emptySlots > 0)
+
+    if totalChests == 0 and not hasStorageChests then
+        chestColor = colors.gray  -- No storage detected yet
+    elseif self.fullChests > 0 and self.partialChests == 0 then
+        chestColor = colors.purple  -- All full
     elseif self.partialChests > 3 then
         chestColor = colors.red
     elseif self.partialChests > 2 then
@@ -362,11 +369,13 @@ function DisplayManager:drawStatus()
     local chestText = self.fullChests .. " + " .. self.partialChests .. " storage filled"
     if w < 36 then
         chestText = self.fullChests .. "+" .. self.partialChests
-    elseif self.fullChests == 0 and self.partialChests == 0 then
+    elseif totalChests == 0 and hasStorageChests then
         chestText = "EMPTY"
+    elseif not hasStorageChests then
+        chestText = "LOADING..."
     end
 
-    self.monitor.setCursorPos(w - string.len(chestText), statusY)
+    self.monitor.setCursorPos(math.max(1, w - string.len(chestText)), statusY)
     self.monitor.setTextColor(chestColor)
     self.monitor.write(chestText)
 end

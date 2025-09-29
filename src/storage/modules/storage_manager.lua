@@ -365,36 +365,58 @@ function StorageManager:depositFromInput(targetChest)
     end
 
     local deposited = false
+    local inputSize = self.inputChest.size()
 
-    for inputSlot = 1, self.inputChest.size() do
+    -- Process each slot in input chest
+    for inputSlot = 1, inputSize do
         local item = self.inputChest.getItemDetail(inputSlot)
         if item then
-            -- First try to stack with existing items
-            for targetSlot = 1, targetChest.peripheral.size() do
-                local targetItem = targetChest.peripheral.getItemDetail(targetSlot)
-                if targetItem and targetItem.name == item.name and
-                        (targetItem.nbt == item.nbt or not targetItem.nbt) and
-                        targetItem.count < targetItem.maxCount then
+            local moved = false
 
-                    local space = targetItem.maxCount - targetItem.count
-                    local moved = self.inputChest.pushItems(targetChest.name, inputSlot, space, targetSlot)
-                    if moved > 0 then
-                        deposited = true
-                        self.logger:debug(string.format("Stacked %d %s", moved, item.displayName), "Storage")
+            -- First try to stack with existing items (only if stackable)
+            if item.maxCount > 1 then
+                for targetSlot = 1, targetChest.peripheral.size() do
+                    local targetItem = targetChest.peripheral.getItemDetail(targetSlot)
+                    if targetItem and targetItem.name == item.name and
+                            targetItem.count < targetItem.maxCount then
+                        -- Check NBT match (handle nil NBT)
+                        local nbtMatch = (targetItem.nbt == item.nbt) or
+                                (not targetItem.nbt and not item.nbt) or
+                                (item.maxCount == 1) -- Single items don't need NBT check
+
+                        if nbtMatch then
+                            local space = targetItem.maxCount - targetItem.count
+                            local toMove = math.min(space, item.count)
+                            local actuallyMoved = self.inputChest.pushItems(targetChest.name, inputSlot, toMove, targetSlot)
+                            if actuallyMoved > 0 then
+                                moved = true
+                                deposited = true
+                                self.logger:debug(string.format("Stacked %d %s into slot %d", actuallyMoved, item.displayName, targetSlot), "Storage")
+
+                                -- Check if we moved everything
+                                item.count = item.count - actuallyMoved
+                                if item.count <= 0 then
+                                    break
+                                end
+                            end
+                        end
                     end
                 end
             end
 
-            -- Then try empty slots
-            item = self.inputChest.getItemDetail(inputSlot) -- Re-check after stacking
-            if item then
-                for targetSlot = 1, targetChest.peripheral.size() do
-                    if not targetChest.peripheral.getItemDetail(targetSlot) then
-                        local moved = self.inputChest.pushItems(targetChest.name, inputSlot, item.count, targetSlot)
-                        if moved > 0 then
-                            deposited = true
-                            self.logger:debug(string.format("Deposited %d %s", moved, item.displayName), "Storage")
-                            break
+            -- If item still exists (not fully stacked), try empty slots
+            if not moved or (item.count and item.count > 0) then
+                -- Re-check the item in case it was partially moved
+                local remainingItem = self.inputChest.getItemDetail(inputSlot)
+                if remainingItem then
+                    for targetSlot = 1, targetChest.peripheral.size() do
+                        if not targetChest.peripheral.getItemDetail(targetSlot) then
+                            local actuallyMoved = self.inputChest.pushItems(targetChest.name, inputSlot, remainingItem.count, targetSlot)
+                            if actuallyMoved > 0 then
+                                deposited = true
+                                self.logger:debug(string.format("Deposited %d %s into empty slot %d", actuallyMoved, remainingItem.displayName, targetSlot), "Storage")
+                                break
+                            end
                         end
                     end
                 end
@@ -494,13 +516,21 @@ function StorageManager:processQueues()
 end
 
 function StorageManager:run()
-    -- Initial reload
-    sleep(0.5) -- Give everything time to initialize
+    -- Initial reload after delay to let peripherals initialize
+    sleep(1)
     self:reloadStorage()
+
+    -- Set initial reload flag for first-time calculation
+    if self.emptySlots == 0 and #self.items == 0 then
+        self.logger:info("Initial storage scan required", "Storage")
+        self:calculateSpace()
+        self:reloadStorage()
+    end
 
     -- Main loop
     local tickTimer = os.startTimer(0.5)
     local reloadTimer = os.startTimer(10) -- Periodic reload
+    local depositTimer = os.startTimer(1) -- Deposit check timer
     local lastInputCheck = 0
 
     while self.running do
@@ -511,12 +541,11 @@ function StorageManager:run()
                 -- Process queues
                 self:processQueues()
                 self.executor:tick()
+                tickTimer = os.startTimer(0.5)
 
-                -- Check for auto-deposit every 2 seconds
-                local now = os.epoch("utc")
-                if now - lastInputCheck > 2000 and self.autoDeposit and self.inputChest and self.emptySlots > 0 then
-                    lastInputCheck = now
-
+            elseif p1 == depositTimer then
+                -- Check for auto-deposit every second (like old code)
+                if self.autoDeposit and self.inputChest and self.emptySlots > 0 then
                     -- Check if input chest has items
                     local hasItems = false
                     for slot = 1, self.inputChest.size() do
@@ -526,12 +555,17 @@ function StorageManager:run()
                         end
                     end
 
-                    if hasItems then
-                        self:queueDeposit()
+                    if hasItems and #self.depositQueue == 0 then
+                        self.logger:debug("Items detected in input chest, queueing deposit", "Storage")
+
+                        -- Sort input chest first (like old code does)
+                        self.executor:submit("deposit-presort", function()
+                            self:sortChest(self.inputChest, "input", false)
+                            self:queueDeposit()
+                        end)
                     end
                 end
-
-                tickTimer = os.startTimer(0.5)
+                depositTimer = os.startTimer(1)
 
             elseif p1 == reloadTimer then
                 -- Periodic full reload to stay in sync
