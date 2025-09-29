@@ -385,9 +385,221 @@ function DisplayManager:draw()
         depositText = "DPS"
     end
 
-    -- DRAW THREAD VISUALIZATION FIRST (like original)
-    -- This ensures bars are drawn before anything else overwrites them
+    -- Draw all UI elements first, then thread visualization LAST
 
+    -- Draw header (sort buttons)
+    local add = 0
+    for i = 1, #self.displaySort do
+        if i == 1 then add = 1 end
+
+        local color = colors.white
+        if self.displaySort[i].ascending then
+            color = colors.lime
+        else
+            color = colors.red
+        end
+
+        if self.selectedSort == i then
+            color = colors.cyan
+        end
+
+        self.monitor.setCursorPos(1 + add, 1)
+        self.monitor.setTextColor(color)
+        self.monitor.write(self.displaySortVisual[self.displaySort[i].sort].large)
+
+        add = add + string.len(self.displaySortVisual[self.displaySort[i].sort].large) + 1
+    end
+
+    if self.selectedSort then
+        self.monitor.setCursorPos(1 + add, 1)
+        self.monitor.setTextColor(colors.yellow)
+        self.monitor.write("[\18]")
+    end
+
+    -- Draw separator
+    self.monitor.setTextColor(colors.gray)
+    for i = 2, w - 1 do
+        self.monitor.setCursorPos(i, 2)
+        self.monitor.write("\140")
+    end
+
+    -- Draw items
+    for i = 1, #self.displayItems do
+        local item = self.displayItems[i]
+
+        if item == self.selectedItem then
+            self.monitor.setTextColor(colors.cyan)
+        elseif item.searching then
+            self.monitor.setTextColor(colors.lime)
+        elseif item.queued then
+            self.monitor.setTextColor(colors.green)
+        elseif item.merged then
+            self.monitor.setTextColor(colors.yellow)
+        elseif item.added then
+            self.monitor.setTextColor(colors.orange)
+        elseif item.overflow then
+            self.monitor.setTextColor(colors.purple)
+        elseif math.fmod(math.ceil(i / self.column), 2) == 0 then
+            self.monitor.setTextColor(colors.lightGray)
+        else
+            self.monitor.setTextColor(colors.white)
+        end
+
+        local itemX = 0
+        for i2 = 0, self.column do
+            if math.fmod(i, i2) == 0 then
+                local widthDiff = math.floor(w / self.column)
+                itemX = (i - 1) * widthDiff - math.floor((i - 1) / self.column) * widthDiff * self.column
+            end
+        end
+
+        self.monitor.setCursorPos(2 + itemX, 2 + math.ceil(i / self.column))
+        local itemCount = tostring(item.item.count)
+        self.monitor.write(string.sub(item.item.displayName, 1, math.floor(w / self.column) - 3 - string.len(itemCount)))
+
+        -- Count color
+        if item.item.count > item.item.maxCount * 16 then
+            self.monitor.setTextColor(colors.pink)
+        elseif item.item.count > item.item.maxCount * 8 then
+            self.monitor.setTextColor(colors.magenta)
+        elseif item.item.count > item.item.maxCount * 4 then
+            self.monitor.setTextColor(colors.purple)
+        elseif item.item.count > item.item.maxCount * 2 then
+            self.monitor.setTextColor(colors.blue)
+        elseif item.item.count > item.item.maxCount then
+            self.monitor.setTextColor(colors.lightBlue)
+        elseif math.fmod(i, 2) == 0 then
+            self.monitor.setTextColor(colors.lightGray)
+        else
+            self.monitor.setTextColor(colors.white)
+        end
+
+        self.monitor.setCursorPos(itemX + (w / self.column) - string.len(itemCount), 2 + math.ceil(i / self.column))
+        self.monitor.write(itemCount)
+    end
+
+    -- Draw column separators
+    self.monitor.setTextColor(colors.gray)
+    for i = 1, self.column - 1 do
+        for i2 = 3, math.ceil(#self.displayItems / self.column) + 2 do
+            self.monitor.setCursorPos(math.floor(w / self.column) * i, i2)
+            self.monitor.write("\127\149")
+        end
+    end
+
+    -- Draw status line
+    local statusY = 3 + math.ceil(#self.displayItems / self.column)
+
+    if self.emptySlots > 108 then
+        self.monitor.setTextColor(colors.cyan)
+    elseif self.emptySlots > 81 then
+        self.monitor.setTextColor(colors.green)
+    elseif self.emptySlots > 54 then
+        self.monitor.setTextColor(colors.yellow)
+    elseif self.emptySlots > 27 then
+        self.monitor.setTextColor(colors.orange)
+    elseif self.emptySlots > 0 then
+        self.monitor.setTextColor(colors.red)
+    else
+        self.monitor.setTextColor(colors.purple)
+    end
+
+    local slotText = self.emptySlots .. " slots free"
+    if w < 36 then
+        slotText = tostring(self.emptySlots)
+    elseif self.emptySlots == 0 then
+        slotText = "FULL"
+    end
+
+    self.monitor.setCursorPos(2, statusY)
+    self.monitor.write(slotText)
+
+    -- Chest status
+    if self.partialChests + self.fullChests > 0 and self.fullChests > 0 then
+        self.monitor.setTextColor(colors.purple)
+    elseif self.partialChests > 3 then
+        self.monitor.setTextColor(colors.red)
+    elseif self.partialChests > 2 then
+        self.monitor.setTextColor(colors.orange)
+    elseif self.partialChests > 1 then
+        self.monitor.setTextColor(colors.yellow)
+    else
+        self.monitor.setTextColor(colors.green)
+    end
+
+    local chestText = self.fullChests .. " + " .. self.partialChests .. " storage filled"
+    if w < 36 then
+        chestText = self.fullChests .. "+" .. self.partialChests
+    elseif self.fullChests == 0 and self.partialChests == 0 then
+        chestText = "EMPTY"
+    end
+
+    self.monitor.setCursorPos(w - string.len(chestText), statusY)
+    self.monitor.write(chestText)
+
+    -- Separator between status and empty space
+    self.monitor.setTextColor(colors.gray)
+    for i = 3 + string.len(slotText), w - 2 - string.len(chestText) do
+        self.monitor.setCursorPos(i, statusY)
+        self.monitor.write("\140")
+    end
+
+    -- Draw separator before thread visualization
+    if statusY < h - 12 then
+        for i = 1, w do
+            self.monitor.setCursorPos(i, h - 12)
+            self.monitor.write("_")
+        end
+    end
+
+    -- Draw selected item controls
+    if self.selectedItem ~= nil then
+        self.monitor.setTextColor(colors.purple)
+        if w > 18 then
+            self.monitor.setCursorPos(w - 2 - string.len(string.sub(self.selectedItem.item.displayName, 1, w)), h - 4)
+        elseif 9 - string.len(self.selectedItem.item.displayName) / 2 < 1 then
+            self.monitor.setCursorPos(1, h - 4)
+        else
+            self.monitor.setCursorPos(9 - string.len(self.selectedItem.item.displayName) / 2, h - 4)
+        end
+        self.monitor.write(self.selectedItem.item.displayName)
+
+        -- Amount controls
+        self.monitor.setCursorPos(w - 12, h - 3)
+        self.monitor.setTextColor(colors.red)
+        self.monitor.write("<")
+
+        self.monitor.setCursorPos(w - 11, h - 3)
+        self.monitor.setTextColor(colors.orange)
+        self.monitor.write("<")
+
+        self.monitor.setCursorPos(w - 10, h - 3)
+        self.monitor.setTextColor(colors.yellow)
+        self.monitor.write("<")
+
+        self.monitor.setTextColor(colors.white)
+        self.monitor.setCursorPos(w - 6 - string.len(tostring(self.desiredAmount)) / 2, h - 3)
+        self.monitor.write(tostring(self.desiredAmount))
+
+        self.monitor.setCursorPos(w - 4, h - 3)
+        self.monitor.setTextColor(colors.yellow)
+        self.monitor.write(">")
+
+        self.monitor.setCursorPos(w - 3, h - 3)
+        self.monitor.setTextColor(colors.lime)
+        self.monitor.write(">")
+
+        self.monitor.setCursorPos(w - 2, h - 3)
+        self.monitor.setTextColor(colors.green)
+        self.monitor.write(">")
+
+        -- Order button
+        self.monitor.setCursorPos(w - 10, h - 2)
+        self.monitor.setTextColor(colors.blue)
+        self.monitor.write("[ORDER]")
+    end
+
+    -- NOW DRAW THREAD VISUALIZATION LAST (matching original)
     -- Thread lists configuration (matching original)
     local lists = {
         reloadLog = {
