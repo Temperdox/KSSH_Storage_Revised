@@ -188,6 +188,7 @@ local function showAnimatedSplash()
 
         local version = "Installer v"..VERSION
         term.setCursorPos(math.floor((w-#version)/2)+1, centerY + imageHeight + 3)
+        term.setTextColor(colors.white)
         term.write(version)
         sleep(0.08)
     end
