@@ -2,88 +2,100 @@
 -- Storage System v2.0.0
 -- Main entry point and process manager
 
-local VERSION = "2.0.0"
+local VERSION  = "2.0.0"
 local APP_NAME = "Storage System"
 
 -- Load core modules
-local Logger = require("modules.logger")
+local Logger         = require("modules.logger")
 local ProcessManager = require("modules.process_manager")
-local EventBus = require("modules.event_bus")
-local Terminal = require("modules.terminal")
-local Config = require("modules.config")
-local API = require("modules.api")
+local EventBus       = require("modules.event_bus")
+local Terminal       = require("modules.terminal")
+local Config         = require("modules.config")
+local API            = require("modules.api")
 
--- Initialize logger
+-- Initialize logger (also expose globally for convenience)
 local logger = Logger:new("logs/storage.log")
+_G.logger = logger
 
--- Global process manager
+-- Global singletons other modules expect
 _G.processManager = ProcessManager:new()
-_G.eventBus = EventBus:new()
-_G.config = Config:new()
+_G.eventBus       = EventBus:new()
+_G.config         = Config:new()
+
+-- Keep a handle to the API server if enabled
+local api = nil
 
 -- Graceful shutdown handler
 local running = true
 local function shutdown()
+    if not running then return end
     running = false
+
     logger:info("Initiating graceful shutdown...")
 
-    -- Stop all processes
-    processManager:stopAll()
+    -- Stop processes
+    if processManager then
+        pcall(function() processManager:stopAll() end)
+    end
 
-    -- Close API
+    -- Stop API
     if api then
-        api:stop()
+        pcall(function() api:stop() end)
+        api = nil
     end
 
     -- Save config
-    config:save()
+    if config then
+        pcall(function() config:save() end)
+    end
 
     logger:info("Shutdown complete")
+    term.setCursorBlink(false)
     term.clear()
     term.setCursorPos(1, 1)
-    print("Storage System stopped")
+    print(APP_NAME .. " stopped")
 end
 
--- Override terminate handler
+-- Trap Ctrl+T and route to graceful shutdown
 local oldPullEvent = os.pullEvent
 os.pullEvent = function(...)
-    local event, p1 = oldPullEvent(...)
-    if event == "terminate" then
+    local e, p1, p2, p3, p4, p5 = oldPullEvent(...)
+    if e == "terminate" then
         shutdown()
         os.pullEvent = oldPullEvent
         error("Terminated", 0)
     end
-    return event, p1
+    return e, p1, p2, p3, p4, p5
 end
 
--- Main initialization
+-- Boot/initialization
 local function init()
-    logger:info("Starting " .. APP_NAME .. " v" .. VERSION)
+    logger:info(("Starting %s v%s..."):format(APP_NAME, VERSION))
 
-    -- Load configuration
+    -- Load configuration (creates defaults if missing)
     config:load()
 
-    -- Initialize terminal UI
+    -- Terminal UI process
     local terminal = Terminal:new(APP_NAME, VERSION, logger)
     processManager:register("terminal", function()
         terminal:run()
     end)
 
-    -- Initialize storage manager process
+    -- Storage manager process
     processManager:register("storage", function()
         local StorageManager = require("modules.storage_manager")
         local storage = StorageManager:new(logger, eventBus)
         storage:run()
     end)
 
-    -- Initialize display manager process
+    -- Display manager process
     processManager:register("display", function()
         local DisplayManager = require("modules.display_manager")
         local display = DisplayManager:new(logger, eventBus)
         display:run()
     end)
 
-    -- Initialize API server
+    -- Optional API server
     if config:get("api.enabled", true) then
         api = API:new(logger, eventBus, config:get("api.port", 9001))
         processManager:register("api", function()
@@ -91,19 +103,18 @@ local function init()
         end)
     end
 
-    -- Start all processes
+    -- Start all registered processes
     processManager:startAll()
 
     logger:info("All systems initialized")
 end
 
--- Main loop
+-- Main scheduler loop (ticks the ProcessManager so coroutines resume)
 local function main()
     init()
-
-    -- Keep main thread alive
     while running do
-        sleep(1)
+        processManager:tick()  -- resume ready processes
+        sleep(0)               -- yield immediately; keeps UI responsive
     end
 end
 
