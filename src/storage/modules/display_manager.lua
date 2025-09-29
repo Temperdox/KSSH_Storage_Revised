@@ -353,13 +353,10 @@ function DisplayManager:draw()
     local w, h = self.monitor.getSize()
     self.column = math.ceil(w / self.columnWidth)
 
-    -- Only clear on first draw
-    if self.firstDraw then
-        self.monitor.setCursorPos(1, 1)
-        self.monitor.clear()
-        self.monitor.setTextScale(0.5)
-        self.firstDraw = false
-    end
+    -- Clear and reset every frame (like original)
+    self.monitor.setCursorPos(1, 1)
+    self.monitor.clear()
+    self.monitor.setTextScale(0.5)
 
     -- Check if enough space
     if h <= math.floor((#self.displayItems - self.column + 1) / self.column) + 15 then
