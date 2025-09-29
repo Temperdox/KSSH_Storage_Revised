@@ -1,5 +1,5 @@
 -- modules/storage_manager.lua
--- Core storage management logic (FIXED VERSION)
+-- Core storage management logic - COMPLETE FIX
 
 local StorageManager = {}
 StorageManager.__index = StorageManager
@@ -30,15 +30,17 @@ function StorageManager:new(logger, eventBus)
     self.outputChest = nil
     self.storageChests = {}
 
-    -- Task queues
+    -- Task queues (matching old code structure)
     self.sortQueue = {}
     self.depositQueue = {}
     self.reformatQueue = {}
     self.orderQueue = {}
 
-    -- Deposit state
-    self.depositActive = false
-    self.lastDepositCheck = 0
+    -- Queue processing flags
+    self.reload = false
+    self.sort = false
+    self.reformat = false
+    self.calculate = false
 
     -- Settings
     self.sortConsolidate = true
@@ -54,20 +56,29 @@ function StorageManager:new(logger, eventBus)
 end
 
 function StorageManager:registerEvents()
+    -- Direct queue manipulation like old code
     self.eventBus:on("storage:reload", function()
-        self:reloadStorage()
+        self.reload = true
+        self.selectedItem = nil
     end)
 
     self.eventBus:on("storage:sort", function(consolidate)
-        self:queueSort(consolidate)
+        self.sort = true
+        self.sortConsolidate = consolidate ~= false
     end)
 
     self.eventBus:on("storage:reformat", function()
-        self:queueReformat()
+        self.reformat = true
     end)
 
     self.eventBus:on("storage:order", function(item, amount)
-        self:queueOrder(item, amount)
+        table.insert(self.orderQueue, {
+            item = item,
+            amount = amount
+        })
+        self.logger:info(string.format("Order queued: %dx %s", amount, item.displayName), "Storage")
+        self.eventBus:emit("storage:order_queued", item, amount)
+        self:updateTaskStatus()
     end)
 
     self.eventBus:on("storage:deposit", function()
@@ -140,30 +151,50 @@ function StorageManager:scanPeripherals()
     })
 end
 
+function StorageManager:updateTaskStatus()
+    -- Send task status to display for visualization
+    self.eventBus:emit("task:status", "sort", {
+        queue = #self.sortQueue,
+        threads = self.executor:getStatus().threads or {}
+    })
+
+    self.eventBus:emit("task:status", "deposit", {
+        queue = #self.depositQueue,
+        threads = self.executor:getStatus().threads or {}
+    })
+
+    self.eventBus:emit("task:status", "reformat", {
+        queue = #self.reformatQueue,
+        threads = self.executor:getStatus().threads or {}
+    })
+
+    self.eventBus:emit("task:status", "order", {
+        queue = #self.orderQueue,
+        active = #self.orderQueue > 0
+    })
+end
+
 function StorageManager:reloadStorage()
     self.logger:info("Reloading storage data...", "Storage")
     self.sound:play("minecraft:item.book.page_turn", 1)
-
-    -- Emit reload started event for UI
-    self.eventBus:emit("storage:reload_started")
 
     self.items = {}
     local itemMap = {}
 
     -- Scan all storage chests
     for _, chest in ipairs(self.storageChests) do
+        self.logger:debug("Scanning " .. chest.name, "Storage")
+        self.sound:play("minecraft:item.spyglass.use", 1)
+
         local items = self.scanner:scanChest(chest.peripheral, chest.name)
 
         -- Merge items into main list
         for _, item in ipairs(items) do
-            -- Create a unique key for the item
             local key = item.name .. "|" .. item.displayName .. "|" .. (item.nbt or "")
 
             if itemMap[key] then
-                -- Add to existing item count
                 itemMap[key].count = itemMap[key].count + item.count
             else
-                -- Create new entry
                 itemMap[key] = {
                     name = item.name,
                     displayName = item.displayName,
@@ -194,24 +225,20 @@ function StorageManager:reloadStorage()
     self.logger:success(string.format("Storage reload complete: %d items, %d empty slots",
             #self.items, self.emptySlots), "Storage")
     self.sound:play("minecraft:item.book.put", 1)
-
-    -- Emit reload complete
-    self.eventBus:emit("storage:reload_complete")
+    self.sound:play("minecraft:block.beacon.activate", 1)
 end
 
 function StorageManager:calculateSpace()
-    self.logger:info("Calculating space...", "Storage")
-    self.sound:play("minecraft:item.spyglass.use", 1)
-
-    -- Emit calculation started
-    self.eventBus:emit("storage:calculation_started")
+    self.logger:info("Calculating space", "Storage")
 
     self.emptySlots = 0
     self.fullChests = 0
     self.partialChests = 0
-    local emptyChests = 0
 
     for _, chest in ipairs(self.storageChests) do
+        self.logger:debug("Calculating space in " .. chest.name, "Storage")
+        self.sound:play("minecraft:item.spyglass.use", 1)
+
         local usage = self.scanner:getChestUsage(chest.peripheral)
 
         self.emptySlots = self.emptySlots + usage.free
@@ -220,31 +247,75 @@ function StorageManager:calculateSpace()
             self.fullChests = self.fullChests + 1
         elseif usage.used > 0 then
             self.partialChests = self.partialChests + 1
-        else
-            emptyChests = emptyChests + 1
         end
     end
 
-    self.logger:success(string.format("Space: %d empty slots, %d full, %d partial, %d empty chests",
-            self.emptySlots, self.fullChests, self.partialChests, emptyChests), "Storage")
     self.sound:play("minecraft:block.end_portal_frame.fill", 1)
+    self.logger:success("Calculation concluded", "Storage")
+end
 
-    -- Emit calculation complete
-    self.eventBus:emit("storage:calculation_complete")
+function StorageManager:queueSort(consolidate)
+    if consolidate == nil then
+        consolidate = self.sortConsolidate
+    end
+
+    for _, chest in ipairs(self.storageChests) do
+        local chestFull = 0
+        for k,v in pairs(chest.peripheral.list()) do
+            chestFull = chestFull + 1
+        end
+
+        if chestFull > 0 then
+            table.insert(self.sortQueue, {
+                chest = chest,
+                consolidate = consolidate
+            })
+            self.logger:info("Queued sort for " .. chest.name, "Storage")
+        end
+    end
+
+    self:updateTaskStatus()
+end
+
+function StorageManager:queueDeposit()
+    if not self.inputChest then
+        self.logger:error("No input chest configured", "Storage")
+        return
+    end
+
+    for _, chest in ipairs(self.storageChests) do
+        table.insert(self.depositQueue, chest)
+        self.logger:info("Queued deposit for " .. chest.name, "Storage")
+    end
+
+    self:updateTaskStatus()
+end
+
+function StorageManager:queueReformat()
+    for _, chest in ipairs(self.storageChests) do
+        local chestFull = 0
+        for k,v in pairs(chest.peripheral.list()) do
+            chestFull = chestFull + 1
+        end
+
+        if chestFull > 0 then
+            table.insert(self.reformatQueue, chest)
+            self.logger:info("Queued reformat for " .. chest.name, "Storage")
+        end
+    end
+
+    self:updateTaskStatus()
 end
 
 function StorageManager:sortChest(chest, name, consolidate)
-    -- Implementation matches your old code's sort logic
     local size = chest.size()
     local sorted = false
     local passes = 0
-    local maxPasses = 10
 
     repeat
         sorted = true
         passes = passes + 1
 
-        -- Find first empty slot
         local firstEmpty = nil
         for slot = 1, size do
             if not chest.getItemDetail(slot) then
@@ -253,7 +324,6 @@ function StorageManager:sortChest(chest, name, consolidate)
             end
         end
 
-        -- If we found an empty slot, move items forward
         if firstEmpty and firstEmpty < size then
             for slot = firstEmpty + 1, size do
                 local item = chest.getItemDetail(slot)
@@ -265,12 +335,11 @@ function StorageManager:sortChest(chest, name, consolidate)
             end
         end
 
-        -- Consolidate stacks if requested
         if consolidate and sorted then
             sorted = self:consolidateChest(chest, name)
         end
 
-    until sorted or passes >= maxPasses
+    until sorted or passes >= 10
 
     return sorted
 end
@@ -284,7 +353,8 @@ function StorageManager:consolidateChest(chest, name)
         if item1 and item1.count < item1.maxCount then
             for slot2 = slot1 + 1, size do
                 local item2 = chest.getItemDetail(slot2)
-                if item2 and item1.name == item2.name and (item1.nbt == item2.nbt or not item1.nbt) then
+                if item2 and item1.name == item2.name and
+                        (item1.nbt == item2.nbt or not item1.nbt or not item2.nbt) then
                     local space = item1.maxCount - item1.count
                     local moved = chest.pushItems(peripheral.getName(chest), slot2, space, slot1)
                     if moved > 0 then
@@ -305,52 +375,40 @@ function StorageManager:depositFromInput(targetChest)
     end
 
     local deposited = false
-    local inputSize = self.inputChest.size()
 
-    for inputSlot = 1, inputSize do
+    for inputSlot = 1, self.inputChest.size() do
         local item = self.inputChest.getItemDetail(inputSlot)
         if item then
-            local moved = false
-
-            -- First try to stack with existing items (only if stackable)
+            -- Try to stack first
             if item.maxCount > 1 then
                 for targetSlot = 1, targetChest.peripheral.size() do
                     local targetItem = targetChest.peripheral.getItemDetail(targetSlot)
                     if targetItem and targetItem.name == item.name and
-                            targetItem.count < targetItem.maxCount then
-                        -- Check NBT match
-                        if targetItem.nbt == item.nbt or not targetItem.nbt or not item.nbt then
-                            local space = targetItem.maxCount - targetItem.count
-                            local toMove = math.min(space, item.count)
-                            local actuallyMoved = self.inputChest.pushItems(targetChest.name, inputSlot, toMove, targetSlot)
-                            if actuallyMoved > 0 then
-                                moved = true
-                                deposited = true
-                                self.logger:debug(string.format("Stacked %d %s", actuallyMoved, item.displayName), "Storage")
-                                self.sound:play("minecraft:item.armor.equip_diamond", 1)
-                                item.count = item.count - actuallyMoved
-                                if item.count <= 0 then
-                                    break
-                                end
-                            end
+                            targetItem.count < targetItem.maxCount and
+                            (targetItem.nbt == item.nbt or not targetItem.nbt or not item.nbt) then
+
+                        local space = targetItem.maxCount - targetItem.count
+                        local moved = self.inputChest.pushItems(targetChest.name, inputSlot, space, targetSlot)
+                        if moved > 0 then
+                            deposited = true
+                            self.logger:debug(string.format("Deposited %dx %s", moved, item.displayName), "Storage")
+                            self.sound:play("minecraft:item.armor.equip_diamond", 1)
                         end
                     end
                 end
             end
 
-            -- If item still exists, try empty slots
-            if not moved or (item.count and item.count > 0) then
-                local remainingItem = self.inputChest.getItemDetail(inputSlot)
-                if remainingItem then
-                    for targetSlot = 1, targetChest.peripheral.size() do
-                        if not targetChest.peripheral.getItemDetail(targetSlot) then
-                            local actuallyMoved = self.inputChest.pushItems(targetChest.name, inputSlot, remainingItem.count, targetSlot)
-                            if actuallyMoved > 0 then
-                                deposited = true
-                                self.logger:debug(string.format("Deposited %d %s", actuallyMoved, remainingItem.displayName), "Storage")
-                                self.sound:play("minecraft:item.armor.equip_turtle", 1)
-                                break
-                            end
+            -- Then try empty slots
+            item = self.inputChest.getItemDetail(inputSlot)
+            if item then
+                for targetSlot = 1, targetChest.peripheral.size() do
+                    if not targetChest.peripheral.getItemDetail(targetSlot) then
+                        local moved = self.inputChest.pushItems(targetChest.name, inputSlot, item.count, targetSlot)
+                        if moved > 0 then
+                            deposited = true
+                            self.logger:debug(string.format("Deposited %dx %s", moved, item.displayName), "Storage")
+                            self.sound:play("minecraft:item.armor.equip_turtle", 1)
+                            break
                         end
                     end
                 end
@@ -361,168 +419,145 @@ function StorageManager:depositFromInput(targetChest)
     return deposited
 end
 
-function StorageManager:queueSort(consolidate)
-    if consolidate == nil then
-        consolidate = self.sortConsolidate
-    end
-
-    for _, chest in ipairs(self.storageChests) do
-        table.insert(self.sortQueue, {
-            chest = chest,
-            consolidate = consolidate
-        })
-    end
-
-    self.logger:info(string.format("Queued %d chests for sorting", #self.storageChests), "Storage")
-    self.eventBus:emit("task:status", "sort", {queue = #self.sortQueue, threads = {}})
-end
-
-function StorageManager:queueDeposit()
-    if not self.inputChest then
-        self.logger:error("No input chest configured", "Storage")
-        return
-    end
-
-    -- Queue deposit for all storage chests
-    for _, chest in ipairs(self.storageChests) do
-        table.insert(self.depositQueue, chest)
-    end
-
-    self.logger:info("Deposit queued", "Storage")
-    self.eventBus:emit("task:status", "deposit", {queue = #self.depositQueue, threads = {}})
-end
-
-function StorageManager:queueReformat()
-    for _, chest in ipairs(self.storageChests) do
-        table.insert(self.reformatQueue, chest)
-    end
-
-    self.logger:info(string.format("Queued %d chests for reformatting", #self.storageChests), "Storage")
-    self.eventBus:emit("task:status", "reformat", {queue = #self.reformatQueue, threads = {}})
-end
-
-function StorageManager:queueOrder(item, amount)
-    table.insert(self.orderQueue, {item = item, amount = amount})
-    self.logger:info(string.format("Order queued: %dx %s", amount, item.displayName), "Storage")
-    self.eventBus:emit("storage:order_queued", item, amount)
-    self.eventBus:emit("task:status", "order", {queue = #self.orderQueue, active = true})
-end
-
 function StorageManager:processQueues()
     -- Process sort queue
     if #self.sortQueue > 0 then
         local task = table.remove(self.sortQueue, 1)
         self.executor:submit("sort", function()
+            self.logger:info("Dispatched sort for " .. task.chest.name, "Storage")
             self:sortChest(task.chest.peripheral, task.chest.name, task.consolidate)
             self.eventBus:emit("storage:sort_complete", task.chest.name)
-            self:calculateSpace()
         end)
+        self:updateTaskStatus()
     end
 
     -- Process deposit queue
     if #self.depositQueue > 0 and self.inputChest then
         local chest = table.remove(self.depositQueue, 1)
         self.executor:submit("deposit", function()
-            local success = self:depositFromInput(chest)
-            if success then
-                self:calculateSpace()
-                -- Schedule reload after deposit
-                os.queueEvent("storage:deposit_complete")
-            end
+            self.logger:info("Dispatched deposit for " .. chest.name, "Storage")
+            self:depositFromInput(chest)
+            self.calculate = true
         end)
+        self:updateTaskStatus()
     end
 
     -- Process reformat queue
     if #self.reformatQueue > 0 then
         local chest = table.remove(self.reformatQueue, 1)
         self.executor:submit("reformat", function()
+            self.logger:info("Dispatched reformat for " .. chest.name, "Storage")
             self:sortChest(chest.peripheral, chest.name, true)
-            self:calculateSpace()
+            self.calculate = true
         end)
+        self:updateTaskStatus()
     end
 
     -- Process order queue
     if #self.orderQueue > 0 and self.outputChest then
         local order = table.remove(self.orderQueue, 1)
         self.executor:submit("order", function()
+            self.logger:info(string.format("Processing order: %dx %s", order.amount, order.item.displayName), "Storage")
             -- Order processing logic here
-            self:reloadStorage()
         end)
+        self:updateTaskStatus()
     end
 end
 
-function StorageManager:checkInputChest()
-    if not self.inputChest or not self.autoDeposit or self.emptySlots <= 0 then
-        return false
-    end
-
-    -- Check if input chest has items
-    local hasItems = false
-    for slot = 1, self.inputChest.size() do
-        if self.inputChest.getItemDetail(slot) then
-            hasItems = true
-            break
+-- Main loops running in parallel
+function StorageManager:sortLoop()
+    while self.running do
+        if self.sort then
+            self:queueSort(self.sortConsolidate)
+            self.sort = false
         end
+        sleep(1)
     end
+end
 
-    if hasItems and not self.depositActive then
-        self.depositActive = true
-        self.logger:debug("Items detected in input chest", "Storage")
+function StorageManager:depositLoop()
+    while self.running do
+        if self.inputChest then
+            local inputFull = 0
+            for k,v in pairs(self.inputChest.list()) do
+                inputFull = inputFull + 1
+            end
 
-        -- Sort input chest first (like old code)
-        self:sortChest(self.inputChest, "input", false)
+            -- Check if deposit threads are active
+            local active = false
+            local status = self.executor:getStatus()
+            for _, thread in ipairs(status.threads) do
+                if thread.active and thread.currentTask and
+                        thread.currentTask.type == "deposit" then
+                    active = true
+                    break
+                end
+            end
 
-        -- Then queue deposit
-        self:queueDeposit()
-
-        -- Mark deposit as active
-        self.eventBus:emit("task:status", "deposit", {active = true})
-
-        return true
-    elseif not hasItems then
-        self.depositActive = false
+            if inputFull > 0 and self.emptySlots > 0 and not active then
+                -- Sort input chest first
+                self:sortChest(self.inputChest, "input", false)
+                -- Queue deposit
+                self:queueDeposit()
+            end
+        end
+        sleep(1)
     end
+end
 
-    return false
+function StorageManager:reformatLoop()
+    while self.running do
+        if self.reformat then
+            self:queueReformat()
+            self.reformat = false
+        end
+        sleep(1)
+    end
+end
+
+function StorageManager:reloadLoop()
+    while self.running do
+        if self.reload then
+            self:reloadStorage()
+            self:calculateSpace()
+            self.reload = false
+        end
+        sleep(1)
+    end
+end
+
+function StorageManager:calculateLoop()
+    while self.running do
+        if self.calculate then
+            self:calculateSpace()
+            self.calculate = false
+        end
+        sleep(1)
+    end
+end
+
+function StorageManager:processLoop()
+    while self.running do
+        self:processQueues()
+        self.executor:tick()
+        sleep(0.1)
+    end
 end
 
 function StorageManager:run()
-    -- Initial setup
+    -- Initial reload
     sleep(1)
-    self:reloadStorage()
+    self.reload = true
 
-    -- Main loop timers
-    local tickTimer = os.startTimer(0.5)
-    local depositCheckTimer = os.startTimer(1)  -- Check every second like old code
-    local reloadTimer = os.startTimer(10)
-
-    while self.running do
-        local event, p1 = os.pullEvent()
-
-        if event == "timer" then
-            if p1 == tickTimer then
-                -- Process queues
-                self:processQueues()
-                self.executor:tick()
-                tickTimer = os.startTimer(0.5)
-
-            elseif p1 == depositCheckTimer then
-                -- Check input chest for items (like old depositloop)
-                self:checkInputChest()
-                depositCheckTimer = os.startTimer(1)
-
-            elseif p1 == reloadTimer then
-                -- Periodic full reload
-                self:reloadStorage()
-                reloadTimer = os.startTimer(10)
-            end
-
-        elseif event == "storage:deposit_complete" then
-            -- Reload after successful deposit
-            self:reloadStorage()
-            self.depositActive = false
-        end
-    end
+    -- Run all loops in parallel (like old code)
+    parallel.waitForAny(
+            function() self:processLoop() end,
+            function() self:sortLoop() end,
+            function() self:depositLoop() end,
+            function() self:reformatLoop() end,
+            function() self:reloadLoop() end,
+            function() self:calculateLoop() end
+    )
 
     self.logger:info("Storage manager stopped", "Storage")
 end
