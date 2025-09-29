@@ -144,15 +144,16 @@ function DisplayManager:registerEvents()
 end
 
 function DisplayManager:addLog(logTable, message, color)
+    -- Add new entry to the END of the table (newest last)
     table.insert(logTable, {
         message = message,
         color = color,
         time = os.epoch("utc") + 2000
     })
 
-    -- Keep only last 10
+    -- Keep only last 10 entries
     while #logTable > 10 do
-        table.remove(logTable, 1)
+        table.remove(logTable, 1)  -- Remove oldest (first) entry
     end
 end
 
@@ -248,7 +249,10 @@ function DisplayManager:updateTaskStatus(type, status)
                     self.tasks.sort.threads[i].active = thread.active and thread.currentTask and thread.currentTask.type == "sort"
 
                     if not wasActive and self.tasks.sort.threads[i].active then
-                        self:addLog(self.tasks.sort.threads[i].log, "sorting", colors.green)
+                        -- Add multiple log entries to create stacking effect
+                        for j = 1, 3 do
+                            self:addLog(self.tasks.sort.threads[i].log, "sorting", colors.green)
+                        end
                     end
                 end
             end
@@ -270,7 +274,10 @@ function DisplayManager:updateTaskStatus(type, status)
                     self.tasks.deposit.threads[i].active = thread.active and thread.currentTask and thread.currentTask.type == "deposit"
 
                     if not wasActive and self.tasks.deposit.threads[i].active then
-                        self:addLog(self.tasks.deposit.threads[i].log, "depositing", colors.orange)
+                        -- Add multiple log entries to create stacking effect
+                        for j = 1, 3 do
+                            self:addLog(self.tasks.deposit.threads[i].log, "depositing", colors.orange)
+                        end
                     end
                 end
             end
@@ -292,7 +299,10 @@ function DisplayManager:updateTaskStatus(type, status)
                     self.tasks.reformat.threads[i].active = thread.active and thread.currentTask and thread.currentTask.type == "reformat"
 
                     if not wasActive and self.tasks.reformat.threads[i].active then
-                        self:addLog(self.tasks.reformat.threads[i].log, "reformatting", colors.purple)
+                        -- Add multiple log entries to create stacking effect
+                        for j = 1, 3 do
+                            self:addLog(self.tasks.reformat.threads[i].log, "reformatting", colors.purple)
+                        end
                     end
                 end
             end
@@ -497,10 +507,12 @@ function DisplayManager:draw()
                             threadNumber = "+"
                         end
 
-                        -- Draw bars FIRST
-                        for i2 = 1, #v.list[i].log do
-                            if i2 <= 10 then  -- Max 10 bars
-                                self.monitor.setCursorPos(v.x + amount, v.y - v.gap - i2)
+                        -- Draw bars FIRST (stack upward, one per log entry)
+                        for i2 = 1, math.min(#v.list[i].log, 10) do
+                            local barY = v.y - i2  -- Each bar goes one row higher
+                            if barY > h - 12 then  -- Don't draw above separator
+                                self.monitor.setCursorPos(v.x + amount, barY)
+                                -- Index directly into the log array
                                 self.monitor.setTextColor(v.list[i].log[i2].color)
                                 self.monitor.write("\138")
                             end
@@ -518,16 +530,16 @@ function DisplayManager:draw()
                         amount = amount + string.len(threadNumber)
                     end
                 elseif v.type == "singlelog" then
-                    -- Draw single log bars
-                    if v.list[i] ~= nil then
-                        self.monitor.setCursorPos(v.x, v.y - v.gap - i)
+                    -- Draw single log bars (stack upward)
+                    if v.list[i] ~= nil and i <= 10 then
+                        self.monitor.setCursorPos(v.x, v.y - i)
                         self.monitor.setTextColor(v.list[i].color)
                         self.monitor.write("\138")
                     end
                 elseif v.type == "queue" then
-                    -- Draw queue bars
-                    if i < 10 then
-                        self.monitor.setCursorPos(v.x, v.y - v.gap - i)
+                    -- Draw queue bars (stack upward)
+                    if i <= 10 then
+                        self.monitor.setCursorPos(v.x, v.y - i)
                         self.monitor.setTextColor(v.color)
                         self.monitor.write("\138")
                     end
