@@ -1,5 +1,5 @@
 -- modules/display_manager.lua
--- Monitor display management - OPTIMIZED DRAWING
+-- Monitor display management - MATCHING ORIGINAL VISUALIZATION
 
 local DisplayManager = {}
 DisplayManager.__index = DisplayManager
@@ -43,34 +43,31 @@ function DisplayManager:new(logger, eventBus)
         count = {large = "[Amount]", small = "[Am]"}
     }
 
-    -- Task status tracking
-    self.sortThreads = {}
-    self.depositThreads = {}
-    self.reformatThreads = {}
-    for i = 1, 16 do
-        self.sortThreads[i] = {active = false, log = {}}
-        self.depositThreads[i] = {active = false, log = {}}
-        self.reformatThreads[i] = {active = false, log = {}}
+    -- Task tracking - MATCHING ORIGINAL STRUCTURE
+    self.tasks = {
+        sort = {queue = {}, threads = {}},
+        deposit = {queue = {}, threads = {}},
+        reformat = {queue = {}, threads = {}}
+    }
+
+    -- Initialize threads
+    for taskType, task in pairs(self.tasks) do
+        for i = 1, 16 do
+            table.insert(task.threads, {active = false, log = {}})
+        end
+        -- Extra thread for deposit
+        if taskType == "deposit" then
+            table.insert(task.threads, {active = false, log = {}})
+        end
     end
-    -- Extra thread for deposit
-    self.depositThreads[17] = {active = false, log = {}}
 
-    self.sortQueue = 0
-    self.depositQueue = 0
-    self.reformatQueue = 0
-    self.orderQueue = 0
-    self.orderActive = false
+    -- Order and reload tracking
+    self.orderQueue = {}
+    self.orderLogs = {active = false, log = {}}
+    self.reloadLogs = {active = false, log = {}}
 
-    -- Logs for display
-    self.reloadActive = false
-    self.reloadLog = {}
-    self.orderLog = {}
-
-    -- Drawing state tracking
-    self.needsFullRedraw = true
-    self.lastItemCount = 0
-    self.lastWidth = 0
-    self.lastHeight = 0
+    -- First draw flag
+    self.firstDraw = true
 
     -- Find monitor
     self:findMonitor()
@@ -99,7 +96,7 @@ function DisplayManager:findMonitor()
             if not skip then
                 self.monitor = peripheral.wrap(name)
                 self.logger:success("Monitor found: " .. name, "Display")
-                self.needsFullRedraw = true
+                self.firstDraw = true
                 break
             end
         end
@@ -128,30 +125,35 @@ function DisplayManager:registerEvents()
 
     -- Reload events
     self.eventBus:on("storage:reload_started", function()
-        self.reloadActive = true
-        table.insert(self.reloadLog, {
-            message = "Reloading",
-            color = colors.cyan,
-            time = os.epoch("utc") + 2000
-        })
+        self.reloadLogs.active = true
+        self:addLog(self.reloadLogs.log, "Reloading", colors.cyan)
     end)
 
     self.eventBus:on("storage:reload_complete", function()
-        self.reloadActive = false
+        self.reloadLogs.active = false
     end)
 
     self.eventBus:on("storage:calculation_started", function()
-        table.insert(self.reloadLog, {
-            message = "Calculating",
-            color = colors.lightBlue,
-            time = os.epoch("utc") + 2000
-        })
+        self:addLog(self.reloadLogs.log, "Calculating", colors.lightBlue)
     end)
 
     -- Stop event
     self.eventBus:on("process:stop:display", function()
         self.running = false
     end)
+end
+
+function DisplayManager:addLog(logTable, message, color)
+    table.insert(logTable, {
+        message = message,
+        color = color,
+        time = os.epoch("utc") + 2000
+    })
+
+    -- Keep only last 10
+    while #logTable > 10 do
+        table.remove(logTable, 1)
+    end
 end
 
 function DisplayManager:updateStorageData(data)
@@ -174,12 +176,6 @@ function DisplayManager:updateStorageData(data)
     self.fullChests = data.fullChests
     self.partialChests = data.partialChests
 
-    -- Check if items changed significantly
-    if #self.displayItems ~= self.lastItemCount then
-        self.needsFullRedraw = true
-        self.lastItemCount = #self.displayItems
-    end
-
     -- Sort items
     self:sortDisplayItems()
 end
@@ -190,11 +186,17 @@ function DisplayManager:sortDisplayItems()
         local aPriority = 0
         local bPriority = 0
 
-        if a.searching then aPriority = 1
-        elseif a.queued or a.overflow then aPriority = 2 end
+        if a.searching then
+            aPriority = 1
+        elseif a.queued or a.overflow then
+            aPriority = 2
+        end
 
-        if b.searching then bPriority = 1
-        elseif b.queued or b.overflow then bPriority = 2 end
+        if b.searching then
+            bPriority = 1
+        elseif b.queued or b.overflow then
+            bPriority = 2
+        end
 
         if aPriority ~= bPriority then
             return aPriority > bPriority
@@ -229,127 +231,314 @@ function DisplayManager:markItemQueued(item, amount)
 end
 
 function DisplayManager:updateTaskStatus(type, status)
-    -- Clean up expired logs first
-    local now = os.epoch("utc")
-
-    -- Clean all thread logs
-    for i = 1, 17 do
-        if self.sortThreads[i] and #self.sortThreads[i].log > 0 then
-            while #self.sortThreads[i].log > 0 and now > self.sortThreads[i].log[1].time do
-                table.remove(self.sortThreads[i].log, 1)
-            end
-        end
-        if self.depositThreads[i] and #self.depositThreads[i].log > 0 then
-            while #self.depositThreads[i].log > 0 and now > self.depositThreads[i].log[1].time do
-                table.remove(self.depositThreads[i].log, 1)
-            end
-        end
-        if i <= 16 and self.reformatThreads[i] and #self.reformatThreads[i].log > 0 then
-            while #self.reformatThreads[i].log > 0 and now > self.reformatThreads[i].log[1].time do
-                table.remove(self.reformatThreads[i].log, 1)
-            end
-        end
-    end
-
-    -- Clean reload and order logs
-    while #self.reloadLog > 0 and now > self.reloadLog[1].time do
-        table.remove(self.reloadLog, 1)
-    end
-    while #self.orderLog > 0 and now > self.orderLog[1].time do
-        table.remove(self.orderLog, 1)
-    end
-
-    -- Update status based on type
     if type == "sort" then
-        self.sortQueue = status.queue or 0
+        -- Update queue
+        while #self.tasks.sort.queue < (status.queue or 0) do
+            table.insert(self.tasks.sort.queue, {})
+        end
+        while #self.tasks.sort.queue > (status.queue or 0) do
+            table.remove(self.tasks.sort.queue)
+        end
+
+        -- Update threads
         if status.threads then
             for i, thread in ipairs(status.threads) do
-                if i <= 16 and self.sortThreads[i] then
-                    local wasActive = self.sortThreads[i].active
-                    self.sortThreads[i].active = thread.active and thread.currentTask and thread.currentTask.type == "sort"
+                if i <= 16 and self.tasks.sort.threads[i] then
+                    local wasActive = self.tasks.sort.threads[i].active
+                    self.tasks.sort.threads[i].active = thread.active and thread.currentTask and thread.currentTask.type == "sort"
 
-                    if not wasActive and self.sortThreads[i].active then
-                        table.insert(self.sortThreads[i].log, {
-                            message = "sorting",
-                            color = colors.green,
-                            time = os.epoch("utc") + 2000
-                        })
-                        while #self.sortThreads[i].log > 10 do
-                            table.remove(self.sortThreads[i].log, 1)
-                        end
+                    if not wasActive and self.tasks.sort.threads[i].active then
+                        self:addLog(self.tasks.sort.threads[i].log, "sorting", colors.green)
                     end
                 end
             end
         end
     elseif type == "deposit" then
-        self.depositQueue = status.queue or 0
+        -- Update queue
+        while #self.tasks.deposit.queue < (status.queue or 0) do
+            table.insert(self.tasks.deposit.queue, {})
+        end
+        while #self.tasks.deposit.queue > (status.queue or 0) do
+            table.remove(self.tasks.deposit.queue)
+        end
+
+        -- Update threads
         if status.threads then
             for i, thread in ipairs(status.threads) do
-                if i <= 17 and self.depositThreads[i] then
-                    local wasActive = self.depositThreads[i].active
-                    self.depositThreads[i].active = thread.active and thread.currentTask and thread.currentTask.type == "deposit"
+                if i <= 17 and self.tasks.deposit.threads[i] then
+                    local wasActive = self.tasks.deposit.threads[i].active
+                    self.tasks.deposit.threads[i].active = thread.active and thread.currentTask and thread.currentTask.type == "deposit"
 
-                    if not wasActive and self.depositThreads[i].active then
-                        table.insert(self.depositThreads[i].log, {
-                            message = "depositing",
-                            color = colors.orange,
-                            time = os.epoch("utc") + 2000
-                        })
-                        while #self.depositThreads[i].log > 10 do
-                            table.remove(self.depositThreads[i].log, 1)
-                        end
+                    if not wasActive and self.tasks.deposit.threads[i].active then
+                        self:addLog(self.tasks.deposit.threads[i].log, "depositing", colors.orange)
                     end
                 end
             end
         end
     elseif type == "reformat" then
-        self.reformatQueue = status.queue or 0
+        -- Update queue
+        while #self.tasks.reformat.queue < (status.queue or 0) do
+            table.insert(self.tasks.reformat.queue, {})
+        end
+        while #self.tasks.reformat.queue > (status.queue or 0) do
+            table.remove(self.tasks.reformat.queue)
+        end
+
+        -- Update threads
         if status.threads then
             for i, thread in ipairs(status.threads) do
-                if i <= 16 and self.reformatThreads[i] then
-                    local wasActive = self.reformatThreads[i].active
-                    self.reformatThreads[i].active = thread.active and thread.currentTask and thread.currentTask.type == "reformat"
+                if i <= 16 and self.tasks.reformat.threads[i] then
+                    local wasActive = self.tasks.reformat.threads[i].active
+                    self.tasks.reformat.threads[i].active = thread.active and thread.currentTask and thread.currentTask.type == "reformat"
 
-                    if not wasActive and self.reformatThreads[i].active then
-                        table.insert(self.reformatThreads[i].log, {
-                            message = "reformatting",
-                            color = colors.purple,
-                            time = os.epoch("utc") + 2000
-                        })
-                        while #self.reformatThreads[i].log > 10 do
-                            table.remove(self.reformatThreads[i].log, 1)
-                        end
+                    if not wasActive and self.tasks.reformat.threads[i].active then
+                        self:addLog(self.tasks.reformat.threads[i].log, "reformatting", colors.purple)
                     end
                 end
             end
         end
     elseif type == "order" then
-        self.orderQueue = status.queue or 0
-        self.orderActive = status.active or false
+        -- Update queue
+        while #self.orderQueue < (status.queue or 0) do
+            table.insert(self.orderQueue, {})
+        end
+        while #self.orderQueue > (status.queue or 0) do
+            table.remove(self.orderQueue)
+        end
+
+        self.orderLogs.active = status.active or false
         if status.active then
-            table.insert(self.orderLog, {
-                message = "ordering",
-                color = colors.blue,
-                time = os.epoch("utc") + 2000
-            })
-            while #self.orderLog > 10 do
-                table.remove(self.orderLog, 1)
+            self:addLog(self.orderLogs.log, "ordering", colors.blue)
+        end
+    end
+
+    -- Clean expired logs
+    self:cleanLogs()
+end
+
+function DisplayManager:cleanLogs()
+    local now = os.epoch("utc")
+
+    -- Clean all logs
+    for _, task in pairs(self.tasks) do
+        for _, thread in ipairs(task.threads) do
+            while #thread.log > 0 and now > thread.log[1].time do
+                table.remove(thread.log, 1)
             end
         end
     end
+
+    while #self.orderLogs.log > 0 and now > self.orderLogs.log[1].time do
+        table.remove(self.orderLogs.log, 1)
+    end
+
+    while #self.reloadLogs.log > 0 and now > self.reloadLogs.log[1].time do
+        table.remove(self.reloadLogs.log, 1)
+    end
 end
 
--- SEGMENT 1: Header with sort buttons
-function DisplayManager:drawHeader()
+function DisplayManager:draw()
     if not self.monitor then return end
 
     local w, h = self.monitor.getSize()
+    self.column = math.ceil(w / self.columnWidth)
 
-    -- Clear line 1
-    self.monitor.setCursorPos(1, 1)
-    self.monitor.clearLine()
+    -- Only clear on first draw
+    if self.firstDraw then
+        self.monitor.setCursorPos(1, 1)
+        self.monitor.clear()
+        self.monitor.setTextScale(0.5)
+        self.firstDraw = false
+    end
 
-    -- Sort buttons
+    -- Check if enough space
+    if h <= math.floor((#self.displayItems - self.column + 1) / self.column) + 15 then
+        self.monitor.setTextColor(colors.red)
+        self.monitor.setTextScale(0.75)
+        self.monitor.setCursorPos(1, 1)
+        self.monitor.write("NOT ENOUGH SPACE")
+        return
+    end
+
+    -- Button text sizes
+    local reloadText = "[RELOAD]"
+    local sortText = "[SORT]"
+    local reformatText = "[REFORMAT]"
+    local depositText = "DEPOSIT"
+
+    if w <= 18 then
+        reloadText = "RL"
+        sortText = "ST"
+        reformatText = "RF"
+        depositText = "DP"
+    elseif w <= 36 then
+        reloadText = "RLD"
+        sortText = "SRT"
+        reformatText = "RFM"
+        depositText = "DPS"
+    end
+
+    -- DRAW THREAD VISUALIZATION FIRST (like original)
+    -- This ensures bars are drawn before anything else overwrites them
+
+    -- Thread lists configuration (matching original)
+    local lists = {
+        reloadLog = {
+            type = "singlelog",
+            list = self.reloadLogs.log,
+            condition = self.reloadLogs.active,
+            color = colors.cyan,
+            x = 1,
+            y = h,
+            gap = 1
+        },
+        sortQueue = {
+            type = "queue",
+            list = self.tasks.sort.queue,
+            condition = #self.tasks.sort.queue > 0,
+            color = colors.green,
+            x = 2 + string.len(reloadText),
+            y = h,
+            gap = 1
+        },
+        sortThreads = {
+            type = "threads",
+            list = self.tasks.sort.threads,
+            condition = nil,
+            color = colors.green,
+            x = 3 + string.len(reloadText),
+            y = h,
+            gap = 1,
+            max = string.len(sortText) - 2
+        },
+        reformatQueue = {
+            type = "queue",
+            list = self.tasks.reformat.queue,
+            condition = #self.tasks.reformat.queue > 0,
+            color = colors.purple,
+            x = 3 + string.len(reloadText) + string.len(sortText),
+            y = h,
+            gap = 1
+        },
+        reformatThreads = {
+            type = "threads",
+            list = self.tasks.reformat.threads,
+            condition = nil,
+            color = colors.purple,
+            x = 4 + string.len(reloadText) + string.len(sortText),
+            y = h,
+            gap = 1,
+            max = string.len(reformatText) - 2
+        },
+        depositQueue = {
+            type = "queue",
+            list = self.tasks.deposit.queue,
+            condition = #self.tasks.deposit.queue > 0,
+            color = colors.orange,
+            x = 4 + string.len(reloadText) + string.len(sortText) + string.len(reformatText),
+            y = h,
+            gap = 1
+        },
+        depositThreads = {
+            type = "threads",
+            list = self.tasks.deposit.threads,
+            condition = nil,
+            color = colors.orange,
+            x = 5 + string.len(reloadText) + string.len(sortText) + string.len(reformatText),
+            y = h,
+            gap = 1,
+            max = string.len(depositText) - 2
+        },
+        orderQueue = {
+            type = "queue",
+            list = self.orderQueue,
+            condition = #self.orderQueue > 0,
+            color = colors.blue,
+            x = w - 1,
+            y = h,
+            gap = 0
+        },
+        orderLog = {
+            type = "singlelog",
+            list = self.orderLogs.log,
+            condition = self.orderLogs.active,
+            color = colors.blue,
+            x = w,
+            y = h,
+            gap = 0
+        }
+    }
+
+    -- Draw thread visualization (bars and indicators)
+    for k, v in pairs(lists) do
+        if v.list ~= nil then
+            if v.type ~= "threads" then
+                -- Draw queue/status indicators
+                self.monitor.setCursorPos(v.x, v.y)
+                if v.condition then
+                    self.monitor.setTextColor(v.color)
+                else
+                    self.monitor.setTextColor(colors.gray)
+                end
+                if v.type == "queue" then
+                    self.monitor.write("Q")
+                else
+                    self.monitor.write("S")
+                end
+            end
+
+            local amount = 0
+            for i = 1, #v.list do
+                if v.type == "threads" then
+                    -- Draw thread indicators and bars
+                    if (v.list[i].active or #v.list[i].log > 0 or 16 <= (v.max or 0)) and amount <= (v.max or 999) then
+                        local threadNumber = string.format("%X", i - 1)
+                        if i > 16 then
+                            threadNumber = "+"
+                        end
+
+                        -- Draw bars FIRST
+                        for i2 = 1, #v.list[i].log do
+                            if i2 <= 10 then  -- Max 10 bars
+                                self.monitor.setCursorPos(v.x + amount, v.y - v.gap - i2)
+                                self.monitor.setTextColor(v.list[i].log[i2].color)
+                                self.monitor.write("\138")
+                            end
+                        end
+
+                        -- Then draw thread number
+                        self.monitor.setCursorPos(v.x + amount, v.y)
+                        if v.list[i].active then
+                            self.monitor.setTextColor(v.color)
+                        else
+                            self.monitor.setTextColor(colors.gray)
+                        end
+                        self.monitor.write(threadNumber)
+
+                        amount = amount + string.len(threadNumber)
+                    end
+                elseif v.type == "singlelog" then
+                    -- Draw single log bars
+                    if v.list[i] ~= nil then
+                        self.monitor.setCursorPos(v.x, v.y - v.gap - i)
+                        self.monitor.setTextColor(v.list[i].color)
+                        self.monitor.write("\138")
+                    end
+                elseif v.type == "queue" then
+                    -- Draw queue bars
+                    if i < 10 then
+                        self.monitor.setCursorPos(v.x, v.y - v.gap - i)
+                        self.monitor.setTextColor(v.color)
+                        self.monitor.write("\138")
+                    end
+                end
+            end
+        end
+    end
+
+    -- NOW DRAW EVERYTHING ELSE ON TOP
+
+    -- Draw header (sort buttons)
     local add = 0
     for i = 1, #self.displaySort do
         if i == 1 then add = 1 end
@@ -372,63 +561,41 @@ function DisplayManager:drawHeader()
         add = add + string.len(self.displaySortVisual[self.displaySort[i].sort].large) + 1
     end
 
-    -- Direction button if sort selected
     if self.selectedSort then
         self.monitor.setCursorPos(1 + add, 1)
         self.monitor.setTextColor(colors.yellow)
         self.monitor.write("[\18]")
     end
 
-    -- Draw separator line on line 2
-    self.monitor.setCursorPos(1, 2)
-    self.monitor.clearLine()
+    -- Draw separator
     self.monitor.setTextColor(colors.gray)
     for i = 2, w - 1 do
         self.monitor.setCursorPos(i, 2)
         self.monitor.write("\140")
-    end
-end
-
--- SEGMENT 2: Item list
-function DisplayManager:drawItems()
-    if not self.monitor then return end
-
-    local w, h = self.monitor.getSize()
-    self.column = math.ceil(w / self.columnWidth)
-
-    local itemsEndY = 2 + math.ceil(#self.displayItems / self.column)
-
-    -- Clear item area (lines 3 to itemsEndY)
-    for y = 3, itemsEndY + 1 do
-        self.monitor.setCursorPos(1, y)
-        self.monitor.clearLine()
     end
 
     -- Draw items
     for i = 1, #self.displayItems do
         local item = self.displayItems[i]
 
-        -- Determine color
-        local color = colors.white
         if item == self.selectedItem then
-            color = colors.cyan
+            self.monitor.setTextColor(colors.cyan)
         elseif item.searching then
-            color = colors.lime
+            self.monitor.setTextColor(colors.lime)
         elseif item.queued then
-            color = colors.green
+            self.monitor.setTextColor(colors.green)
         elseif item.merged then
-            color = colors.yellow
+            self.monitor.setTextColor(colors.yellow)
         elseif item.added then
-            color = colors.orange
+            self.monitor.setTextColor(colors.orange)
         elseif item.overflow then
-            color = colors.purple
+            self.monitor.setTextColor(colors.purple)
         elseif math.fmod(math.ceil(i / self.column), 2) == 0 then
-            color = colors.lightGray
+            self.monitor.setTextColor(colors.lightGray)
+        else
+            self.monitor.setTextColor(colors.white)
         end
 
-        self.monitor.setTextColor(color)
-
-        -- Calculate position
         local itemX = 0
         for i2 = 0, self.column do
             if math.fmod(i, i2) == 0 then
@@ -437,29 +604,29 @@ function DisplayManager:drawItems()
             end
         end
 
-        -- Draw item name
         self.monitor.setCursorPos(2 + itemX, 2 + math.ceil(i / self.column))
-        local nameLen = math.floor(w / self.column) - 3 - string.len(tostring(item.item.count))
-        self.monitor.write(string.sub(item.item.displayName, 1, nameLen))
+        local itemCount = tostring(item.item.count)
+        self.monitor.write(string.sub(item.item.displayName, 1, math.floor(w / self.column) - 3 - string.len(itemCount)))
 
-        -- Draw item count
-        local countColor = colors.white
+        -- Count color
         if item.item.count > item.item.maxCount * 16 then
-            countColor = colors.pink
+            self.monitor.setTextColor(colors.pink)
         elseif item.item.count > item.item.maxCount * 8 then
-            countColor = colors.magenta
+            self.monitor.setTextColor(colors.magenta)
         elseif item.item.count > item.item.maxCount * 4 then
-            countColor = colors.purple
+            self.monitor.setTextColor(colors.purple)
         elseif item.item.count > item.item.maxCount * 2 then
-            countColor = colors.blue
+            self.monitor.setTextColor(colors.blue)
         elseif item.item.count > item.item.maxCount then
-            countColor = colors.lightBlue
+            self.monitor.setTextColor(colors.lightBlue)
+        elseif math.fmod(i, 2) == 0 then
+            self.monitor.setTextColor(colors.lightGray)
+        else
+            self.monitor.setTextColor(colors.white)
         end
 
-        self.monitor.setTextColor(countColor)
-        self.monitor.setCursorPos(itemX + (w / self.column) - string.len(tostring(item.item.count)),
-                2 + math.ceil(i / self.column))
-        self.monitor.write(tostring(item.item.count))
+        self.monitor.setCursorPos(itemX + (w / self.column) - string.len(itemCount), 2 + math.ceil(i / self.column))
+        self.monitor.write(itemCount)
     end
 
     -- Draw column separators
@@ -472,22 +639,20 @@ function DisplayManager:drawItems()
     end
 
     -- Draw status line
-    local statusY = itemsEndY + 1
-    self.monitor.setCursorPos(1, statusY)
-    self.monitor.clearLine()
+    local statusY = 3 + math.ceil(#self.displayItems / self.column)
 
-    -- Empty slots display
-    local slotColor = colors.cyan
-    if self.emptySlots <= 0 then
-        slotColor = colors.purple
-    elseif self.emptySlots <= 27 then
-        slotColor = colors.red
-    elseif self.emptySlots <= 54 then
-        slotColor = colors.orange
-    elseif self.emptySlots <= 81 then
-        slotColor = colors.yellow
-    elseif self.emptySlots <= 108 then
-        slotColor = colors.green
+    if self.emptySlots > 108 then
+        self.monitor.setTextColor(colors.cyan)
+    elseif self.emptySlots > 81 then
+        self.monitor.setTextColor(colors.green)
+    elseif self.emptySlots > 54 then
+        self.monitor.setTextColor(colors.yellow)
+    elseif self.emptySlots > 27 then
+        self.monitor.setTextColor(colors.orange)
+    elseif self.emptySlots > 0 then
+        self.monitor.setTextColor(colors.red)
+    else
+        self.monitor.setTextColor(colors.purple)
     end
 
     local slotText = self.emptySlots .. " slots free"
@@ -498,19 +663,19 @@ function DisplayManager:drawItems()
     end
 
     self.monitor.setCursorPos(2, statusY)
-    self.monitor.setTextColor(slotColor)
     self.monitor.write(slotText)
 
     -- Chest status
-    local chestColor = colors.green
     if self.partialChests + self.fullChests > 0 and self.fullChests > 0 then
-        chestColor = colors.purple
+        self.monitor.setTextColor(colors.purple)
     elseif self.partialChests > 3 then
-        chestColor = colors.red
+        self.monitor.setTextColor(colors.red)
     elseif self.partialChests > 2 then
-        chestColor = colors.orange
+        self.monitor.setTextColor(colors.orange)
     elseif self.partialChests > 1 then
-        chestColor = colors.yellow
+        self.monitor.setTextColor(colors.yellow)
+    else
+        self.monitor.setTextColor(colors.green)
     end
 
     local chestText = self.fullChests .. " + " .. self.partialChests .. " storage filled"
@@ -521,235 +686,24 @@ function DisplayManager:drawItems()
     end
 
     self.monitor.setCursorPos(w - string.len(chestText), statusY)
-    self.monitor.setTextColor(chestColor)
     self.monitor.write(chestText)
-end
 
--- SEGMENT 3: Task visualization
-function DisplayManager:drawTaskVisualization()
-    if not self.monitor then return end
-
-    local w, h = self.monitor.getSize()
-
-    -- Calculate positions
-    local separatorY = h - 12
-    local maxBarHeight = 10
-    local threadY = h
-
-    -- Clear visualization area (from separator to bottom-2)
-    for y = math.max(separatorY - 1, 1), h - 2 do
-        self.monitor.setCursorPos(1, y)
-        self.monitor.clearLine()
-    end
-
-    -- Draw separator line
+    -- Separator between status and empty space
     self.monitor.setTextColor(colors.gray)
-    for x = 1, w do
-        self.monitor.setCursorPos(x, separatorY - 1)
-        self.monitor.write("_")
+    for i = 3 + string.len(slotText), w - 2 - string.len(chestText) do
+        self.monitor.setCursorPos(i, statusY)
+        self.monitor.write("\140")
     end
 
-    -- Thread colors
-    local threadColors = {colors.green, colors.lime, colors.yellow, colors.cyan,
-                          colors.lightBlue, colors.blue, colors.purple, colors.magenta,
-                          colors.pink, colors.red, colors.orange, colors.brown}
-
-    -- Button text sizes
-    local reloadText = "[RELOAD]"
-    local sortText = "[SORT]"
-    local reformatText = "[REFORMAT]"
-    local depositText = "DEPOSIT"
-
-    if w <= 18 then
-        reloadText = "RL"
-        sortText = "ST"
-        reformatText = "RF"
-        depositText = "DP"
-    elseif w <= 36 then
-        reloadText = "RLD"
-        sortText = "SRT"
-        reformatText = "RFM"
-        depositText = "DPS"
-    end
-
-    -- RELOAD visualization
-    if self.reloadActive or #self.reloadLog > 0 then
-        -- Draw bars
-        for i = 1, math.min(#self.reloadLog, maxBarHeight) do
-            local barY = threadY - i
-            if barY > separatorY then
-                self.monitor.setCursorPos(1, barY)
-                self.monitor.setTextColor(colors.cyan)
-                self.monitor.write("\138")
-            end
-        end
-        -- Draw indicator
-        self.monitor.setCursorPos(1, threadY)
-        self.monitor.setTextColor(self.reloadActive and colors.cyan or colors.gray)
-        self.monitor.write("S")
-    end
-
-    -- SORT visualization
-    if self.sortQueue > 0 then
-        self.monitor.setCursorPos(2 + string.len(reloadText), threadY)
-        self.monitor.setTextColor(colors.green)
-        self.monitor.write("Q")
-    end
-
-    local sortX = 3 + string.len(reloadText)
-    local threadNum = 0
-
-    for i = 1, 16 do
-        if self.sortThreads[i] and (self.sortThreads[i].active or #self.sortThreads[i].log > 0) then
-            if threadNum < string.len(sortText) - 2 then
-                local threadColor = threadColors[(i-1) % #threadColors + 1]
-
-                -- Draw bars
-                for j = 1, math.min(#self.sortThreads[i].log, maxBarHeight) do
-                    local barY = threadY - j
-                    if barY > separatorY then
-                        self.monitor.setCursorPos(sortX + threadNum, barY)
-                        self.monitor.setTextColor(threadColor)
-                        self.monitor.write("\138")
-                    end
-                end
-
-                -- Draw thread number
-                self.monitor.setCursorPos(sortX + threadNum, threadY)
-                self.monitor.setTextColor(self.sortThreads[i].active and threadColor or colors.gray)
-                self.monitor.write(string.format("%X", i-1))
-
-                threadNum = threadNum + 1
-            end
+    -- Draw separator before thread visualization
+    if statusY < h - 12 then
+        for i = 1, w do
+            self.monitor.setCursorPos(i, h - 12)
+            self.monitor.write("_")
         end
     end
 
-    -- REFORMAT visualization
-    if self.reformatQueue > 0 then
-        self.monitor.setCursorPos(3 + string.len(reloadText) + string.len(sortText), threadY)
-        self.monitor.setTextColor(colors.purple)
-        self.monitor.write("Q")
-    end
-
-    local reformatX = 4 + string.len(reloadText) + string.len(sortText)
-    threadNum = 0
-
-    for i = 1, 16 do
-        if self.reformatThreads[i] and (self.reformatThreads[i].active or #self.reformatThreads[i].log > 0) then
-            if threadNum < string.len(reformatText) - 2 then
-                local threadColor = threadColors[(i-1) % #threadColors + 1]
-
-                -- Draw bars
-                for j = 1, math.min(#self.reformatThreads[i].log, maxBarHeight) do
-                    local barY = threadY - j
-                    if barY > separatorY then
-                        self.monitor.setCursorPos(reformatX + threadNum, barY)
-                        self.monitor.setTextColor(threadColor)
-                        self.monitor.write("\138")
-                    end
-                end
-
-                -- Draw thread number
-                self.monitor.setCursorPos(reformatX + threadNum, threadY)
-                self.monitor.setTextColor(self.reformatThreads[i].active and threadColor or colors.gray)
-                self.monitor.write(string.format("%X", i-1))
-
-                threadNum = threadNum + 1
-            end
-        end
-    end
-
-    -- DEPOSIT visualization
-    if self.depositQueue > 0 then
-        self.monitor.setCursorPos(4 + string.len(reloadText) + string.len(sortText) + string.len(reformatText), threadY)
-        self.monitor.setTextColor(colors.orange)
-        self.monitor.write("Q")
-    end
-
-    local depositX = 5 + string.len(reloadText) + string.len(sortText) + string.len(reformatText)
-    threadNum = 0
-
-    for i = 1, 17 do
-        if self.depositThreads[i] and (self.depositThreads[i].active or #self.depositThreads[i].log > 0) then
-            if threadNum < string.len(depositText) - 2 then
-                local threadColor = threadColors[(i-1) % #threadColors + 1]
-
-                -- Draw bars
-                for j = 1, math.min(#self.depositThreads[i].log, maxBarHeight) do
-                    local barY = threadY - j
-                    if barY > separatorY then
-                        self.monitor.setCursorPos(depositX + threadNum, barY)
-                        self.monitor.setTextColor(threadColor)
-                        self.monitor.write("\138")
-                    end
-                end
-
-                -- Draw thread number
-                self.monitor.setCursorPos(depositX + threadNum, threadY)
-                self.monitor.setTextColor(self.depositThreads[i].active and threadColor or colors.gray)
-                local threadLabel = i <= 16 and string.format("%X", i-1) or "+"
-                self.monitor.write(threadLabel)
-
-                threadNum = threadNum + 1
-            end
-        end
-    end
-
-    -- ORDER visualization
-    if self.orderQueue > 0 then
-        self.monitor.setCursorPos(w - 1, threadY)
-        self.monitor.setTextColor(colors.blue)
-        self.monitor.write("Q")
-    end
-
-    if self.orderActive or #self.orderLog > 0 then
-        -- Draw bars
-        for i = 1, math.min(#self.orderLog, maxBarHeight) do
-            local barY = threadY - i
-            if barY > separatorY then
-                self.monitor.setCursorPos(w, barY)
-                self.monitor.setTextColor(colors.blue)
-                self.monitor.write("\138")
-            end
-        end
-
-        self.monitor.setCursorPos(w, threadY)
-        self.monitor.setTextColor(self.orderActive and colors.blue or colors.gray)
-        self.monitor.write("S")
-    end
-end
-
--- SEGMENT 4: Footer with buttons
-function DisplayManager:drawFooter()
-    if not self.monitor then return end
-
-    local w, h = self.monitor.getSize()
-
-    -- Clear footer lines
-    self.monitor.setCursorPos(1, h - 1)
-    self.monitor.clearLine()
-    self.monitor.setCursorPos(1, h)
-    self.monitor.clearLine()
-
-    -- Button text sizes
-    local reloadText = "[RELOAD]"
-    local sortText = "[SORT]"
-    local reformatText = "[REFORMAT]"
-    local depositText = "DEPOSIT"
-
-    if w <= 18 then
-        reloadText = "RL"
-        sortText = "ST"
-        reformatText = "RF"
-        depositText = "DP"
-    elseif w <= 36 then
-        reloadText = "RLD"
-        sortText = "SRT"
-        reformatText = "RFM"
-        depositText = "DPS"
-    end
-
-    -- Draw buttons
+    -- Draw bottom buttons
     self.monitor.setCursorPos(1, h - 1)
     self.monitor.setTextColor(colors.cyan)
     self.monitor.write(reloadText)
@@ -762,32 +716,20 @@ function DisplayManager:drawFooter()
     self.monitor.setTextColor(colors.purple)
     self.monitor.write(reformatText)
 
-    -- Deposit indicator
     self.monitor.setCursorPos(4 + string.len(reloadText) + string.len(sortText) + string.len(reformatText), h - 1)
-    local depositActive = self.depositQueue > 0
-    for _, thread in ipairs(self.depositThreads) do
-        if thread.active then
-            depositActive = true
-            break
-        end
-    end
-    self.monitor.setTextColor(depositActive and colors.orange or colors.gray)
+    self.monitor.setTextColor(colors.orange)
     self.monitor.write(depositText)
 
-    -- Draw order controls if item selected
-    if self.selectedItem then
-        -- Clear area for order controls
-        for y = h - 4, h - 2 do
-            self.monitor.setCursorPos(w - 15, y)
-            for x = w - 15, w do
-                self.monitor.setCursorPos(x, y)
-                self.monitor.write(" ")
-            end
-        end
-
-        -- Item name
-        self.monitor.setCursorPos(math.max(1, w - 2 - string.len(self.selectedItem.item.displayName)), h - 4)
+    -- Draw selected item controls
+    if self.selectedItem ~= nil then
         self.monitor.setTextColor(colors.purple)
+        if w > 18 then
+            self.monitor.setCursorPos(w - 2 - string.len(string.sub(self.selectedItem.item.displayName, 1, w)), h - 4)
+        elseif 9 - string.len(self.selectedItem.item.displayName) / 2 < 1 then
+            self.monitor.setCursorPos(1, h - 4)
+        else
+            self.monitor.setCursorPos(9 - string.len(self.selectedItem.item.displayName) / 2, h - 4)
+        end
         self.monitor.write(self.selectedItem.item.displayName)
 
         -- Amount controls
@@ -803,8 +745,8 @@ function DisplayManager:drawFooter()
         self.monitor.setTextColor(colors.yellow)
         self.monitor.write("<")
 
-        self.monitor.setCursorPos(math.max(1, w - 6 - string.len(tostring(self.desiredAmount)) / 2), h - 3)
         self.monitor.setTextColor(colors.white)
+        self.monitor.setCursorPos(w - 6 - string.len(tostring(self.desiredAmount)) / 2, h - 3)
         self.monitor.write(tostring(self.desiredAmount))
 
         self.monitor.setCursorPos(w - 4, h - 3)
@@ -820,56 +762,9 @@ function DisplayManager:drawFooter()
         self.monitor.write(">")
 
         -- Order button
-        self.monitor.setCursorPos(math.max(1, w - 10), h - 2)
+        self.monitor.setCursorPos(w - 10, h - 2)
         self.monitor.setTextColor(colors.blue)
         self.monitor.write("[ORDER]")
-    end
-end
-
-function DisplayManager:draw()
-    if not self.monitor then return end
-
-    local w, h = self.monitor.getSize()
-
-    -- Check for resize
-    if w ~= self.lastWidth or h ~= self.lastHeight then
-        self.needsFullRedraw = true
-        self.lastWidth = w
-        self.lastHeight = h
-    end
-
-    -- Only clear screen on first draw or major changes
-    if self.needsFullRedraw then
-        self.monitor.clear()
-        self.monitor.setTextScale(0.5)
-        self.needsFullRedraw = false
-    end
-
-    -- Check if there's enough space
-    local minHeight = 15
-    local itemRows = 0
-    if #self.displayItems > 0 then
-        self.column = math.max(1, math.ceil(w / self.columnWidth))
-        itemRows = math.ceil(#self.displayItems / self.column)
-    end
-
-    local neededHeight = itemRows + 14
-
-    if h >= minHeight and h >= neededHeight then
-        -- Draw each segment independently
-        self:drawHeader()
-        self:drawItems()
-        self:drawTaskVisualization()
-        self:drawFooter()
-    else
-        -- Show error
-        self.monitor.clear()
-        self.monitor.setTextColor(colors.red)
-        self.monitor.setCursorPos(1, 1)
-        self.monitor.write("SCREEN TOO SMALL")
-        self.monitor.setCursorPos(1, 2)
-        self.monitor.setTextColor(colors.yellow)
-        self.monitor.write("Min: " .. minHeight .. "h")
     end
 end
 
@@ -877,6 +772,21 @@ function DisplayManager:handleTouch(x, y)
     if not self.monitor then return end
 
     local w, h = self.monitor.getSize()
+
+    -- Button text sizes
+    local reloadText = "[RELOAD]"
+    local sortText = "[SORT]"
+    local reformatText = "[REFORMAT]"
+
+    if w <= 18 then
+        reloadText = "RL"
+        sortText = "ST"
+        reformatText = "RF"
+    elseif w <= 36 then
+        reloadText = "RLD"
+        sortText = "SRT"
+        reformatText = "RFM"
+    end
 
     -- Check item selection
     if y < h - 10 then
@@ -909,44 +819,16 @@ function DisplayManager:handleTouch(x, y)
         end
     end
 
-    -- Check button clicks
-    self:handleButtonClick(x, y)
-end
-
-function DisplayManager:handleButtonClick(x, y)
-    if not self.monitor then return end
-
-    local w, h = self.monitor.getSize()
-
-    -- Button text sizes
-    local reloadText = "[RELOAD]"
-    local sortText = "[SORT]"
-    local reformatText = "[REFORMAT]"
-
-    if w <= 18 then
-        reloadText = "RL"
-        sortText = "ST"
-        reformatText = "RF"
-    elseif w <= 36 then
-        reloadText = "RLD"
-        sortText = "SRT"
-        reformatText = "RFM"
-    end
-
     -- Bottom control buttons
     if y == h - 1 then
-        -- Reload button
         if x >= 1 and x <= string.len(reloadText) then
             self.eventBus:emit("storage:reload")
             self.eventBus:emit("storage:reload_started")
             self.selectedItem = nil
             self.sound:play("minecraft:item.book.page_turn", 1)
-            -- Sort button
-        elseif x >= 2 + string.len(reloadText) and
-                x < 2 + string.len(reloadText) + string.len(sortText) then
+        elseif x >= 2 + string.len(reloadText) and x < 2 + string.len(reloadText) + string.len(sortText) then
             self.eventBus:emit("storage:sort", true)
             self.sound:play("minecraft:block.barrel.open", 1)
-            -- Reformat button
         elseif x >= 3 + string.len(reloadText) + string.len(sortText) and
                 x < 3 + string.len(reloadText) + string.len(sortText) + string.len(reformatText) then
             self.eventBus:emit("storage:reformat")
@@ -963,7 +845,6 @@ function DisplayManager:handleButtonClick(x, y)
             if x >= add and x < add + buttonLen then
                 if self.selectedSort then
                     if self.selectedSort ~= i then
-                        -- Reorder sort priorities
                         local tempSort = self.displaySort[self.selectedSort]
                         table.remove(self.displaySort, self.selectedSort)
                         table.insert(self.displaySort, i, tempSort)
@@ -983,7 +864,7 @@ function DisplayManager:handleButtonClick(x, y)
             add = add + buttonLen + 1
         end
 
-        -- Direction toggle button
+        -- Direction toggle
         if self.selectedSort and x >= add and x < add + 3 then
             self.displaySort[self.selectedSort].ascending = not self.displaySort[self.selectedSort].ascending
             self.sound:play("minecraft:block.sculk_sensor.clicking", 1)
@@ -994,27 +875,21 @@ function DisplayManager:handleButtonClick(x, y)
 
     -- Order controls
     if self.selectedItem and y == h - 3 then
-        -- Stack down
         if x == w - 12 then
             self.desiredAmount = math.max(1, self.desiredAmount - self.selectedItem.item.maxCount)
             self.sound:play("minecraft:block.amethyst_block.break", 0.5 + (self.desiredAmount / self.selectedItem.item.count))
-            -- Ten down
         elseif x == w - 11 then
             self.desiredAmount = math.max(1, self.desiredAmount - 10)
             self.sound:play("minecraft:block.amethyst_block.hit", 0.5 + (self.desiredAmount / self.selectedItem.item.count))
-            -- One down
         elseif x == w - 10 then
             self.desiredAmount = math.max(1, self.desiredAmount - 1)
             self.sound:play("minecraft:block.amethyst_block.step", 0.5 + (self.desiredAmount / self.selectedItem.item.count))
-            -- One up
         elseif x == w - 4 then
             self.desiredAmount = math.min(math.min(999, self.selectedItem.item.count), self.desiredAmount + 1)
             self.sound:play("minecraft:block.amethyst_block.step", 0.5 + (self.desiredAmount / self.selectedItem.item.count))
-            -- Ten up
         elseif x == w - 3 then
             self.desiredAmount = math.min(math.min(999, self.selectedItem.item.count), self.desiredAmount + 10)
             self.sound:play("minecraft:block.amethyst_block.hit", 0.5 + (self.desiredAmount / self.selectedItem.item.count))
-            -- Stack up
         elseif x == w - 2 then
             self.desiredAmount = math.min(math.min(999, self.selectedItem.item.count),
                     self.desiredAmount + self.selectedItem.item.maxCount)
