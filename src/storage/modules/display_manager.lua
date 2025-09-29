@@ -655,8 +655,18 @@ function DisplayManager:run()
     if not self.monitor then
         self.logger:warning("No monitor found, display manager idle", "Display")
         while self.running do
-            sleep(1)
+            -- Check periodically if a monitor becomes available
+            self:findMonitor()
+            if self.monitor then
+                self.logger:success("Monitor detected, starting display", "Display")
+                break
+            end
+            sleep(5)
         end
+    end
+
+    -- Only proceed if we have a monitor
+    if not self.monitor then
         return
     end
 
@@ -670,10 +680,23 @@ function DisplayManager:run()
         local event, p1, p2, p3 = os.pullEvent()
 
         if event == "timer" and p1 == drawTimer then
-            self:draw()
+            -- Verify monitor still exists before drawing
+            if self.monitor then
+                self:draw()
+            else
+                -- Try to find monitor again
+                self:findMonitor()
+            end
             drawTimer = os.startTimer(0.1)
+
         elseif event == "monitor_touch" then
-            self:handleTouch(p2, p3)
+            -- Only handle touch if we have a monitor and it's the correct one
+            if self.monitor and peripheral.getName(self.monitor) == p1 then
+                self:handleTouch(p2, p3)
+            end
+
+        elseif event == "process:stop:display" then
+            self.running = false
         end
     end
 
