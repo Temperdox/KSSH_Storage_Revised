@@ -322,7 +322,7 @@ local function showAnimatedSplash()
     -- Final pause
     term.setCursorPos(math.floor((w - 23) / 2), h - 2)
     term.setTextColor(colors.lightGray)
-    term.write("   Press any key to begin")
+    term.write("  Press any key to begin")
 
     os.pullEvent("key")
     clearScreen()
