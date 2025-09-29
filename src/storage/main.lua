@@ -113,8 +113,12 @@ end
 local function main()
     init()
     while running do
-        processManager:tick()  -- resume ready processes
-        os.pullEvent()               -- yield immediately; keeps UI responsive
+        processManager:tick()
+        -- Pull event with no filter, short timeout
+        local event = {os.pullEventRaw(0.1)}
+        if event[1] == "terminate" then
+            break
+        end
     end
 end
 

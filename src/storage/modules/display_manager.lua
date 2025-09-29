@@ -454,38 +454,42 @@ function DisplayManager:draw()
 
     local w, h = self.monitor.getSize()
 
-    -- Calculate required height more accurately
-    local itemRows = math.max(1, math.ceil(#self.displayItems / self.column))
-    local requiredHeight = itemRows + 8  -- Header + items + status + buttons + margins
+    -- Simplified space check - just need minimum space for basic UI
+    local minHeight = 10  -- Much more reasonable minimum
+    local itemRows = 0
+    if #self.displayItems > 0 then
+        self.column = math.max(1, math.ceil(w / self.columnWidth))
+        itemRows = math.ceil(#self.displayItems / self.column)
+    end
 
-    if h >= requiredHeight then
+    local neededHeight = itemRows + 6  -- Header + items + status + buttons + margins
+
+    if h >= minHeight and h >= neededHeight then
         self:drawHeader()
         self:drawItems()
         self:drawStatus()
         self:drawButtons()
     else
-        -- Try smaller text scale
-        self.monitor.setTextScale(0.25)
-        w, h = self.monitor.getSize()
+        -- Show simplified error with debug info
+        self.monitor.setTextColor(colors.red)
+        self.monitor.setCursorPos(1, 1)
+        self.monitor.write("SCREEN TOO SMALL")
 
-        itemRows = math.max(1, math.ceil(#self.displayItems / math.ceil(w / 12)))
-        requiredHeight = itemRows + 6
+        self.monitor.setTextColor(colors.white)
+        self.monitor.setCursorPos(1, 2)
+        self.monitor.write("Size: " .. w .. "x" .. h)
 
-        if h >= requiredHeight then
-            self:drawHeader()
-            self:drawItems()
-            self:drawStatus()
-            self:drawButtons()
-        else
-            -- Show error message
-            self.monitor.setTextColor(colors.red)
-            self.monitor.setTextScale(0.5)
-            self.monitor.setCursorPos(1, 1)
-            self.monitor.write("MONITOR TOO SMALL")
-            self.monitor.setCursorPos(1, 2)
-            self.monitor.write("Need: " .. requiredHeight)
-            self.monitor.setCursorPos(1, 3)
-            self.monitor.write("Have: " .. h)
+        self.monitor.setCursorPos(1, 3)
+        self.monitor.write("Need: " .. neededHeight)
+
+        self.monitor.setCursorPos(1, 4)
+        self.monitor.write("Items: " .. #self.displayItems)
+
+        -- Try to at least show basic info if we have some space
+        if h >= 6 then
+            self.monitor.setCursorPos(1, 5)
+            self.monitor.setTextColor(colors.yellow)
+            self.monitor.write("Empty slots: " .. self.emptySlots)
         end
     end
 end
