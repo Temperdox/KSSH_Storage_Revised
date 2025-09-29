@@ -437,6 +437,9 @@ function StorageManager:depositFromInput(targetChest)
     local deposited = false
     local totalMoved = 0
 
+    -- Get the proper peripheral name for the target chest
+    local targetName = targetChest.name  -- This should already be the peripheral name like "minecraft:barrel_18"
+
     for inputSlot = 1, self.inputChest.size() do
         local item = self.inputChest.getItemDetail(inputSlot)
         if item then
@@ -449,27 +452,39 @@ function StorageManager:depositFromInput(targetChest)
                             (targetItem.nbt == item.nbt or not targetItem.nbt or not item.nbt) then
 
                         local space = targetItem.maxCount - targetItem.count
-                        local moved = self.inputChest.pushItems(targetChest.name, inputSlot, space, targetSlot)
-                        if moved > 0 then
+                        local toMove = math.min(space, item.count)
+
+                        -- pushItems: source peripheral pushes to target name
+                        local moved = self.inputChest.pushItems(targetName, inputSlot, toMove, targetSlot)
+
+                        if moved and moved > 0 then
                             deposited = true
                             totalMoved = totalMoved + moved
-                            self.logger:debug(string.format("Stacked %dx %s", moved, item.displayName), "Storage")
+                            self.logger:debug(string.format("Stacked %dx %s to slot %d", moved, item.displayName, targetSlot), "Storage")
                             self.sound:play("minecraft:item.armor.equip_diamond", 1)
+
+                            -- Update item count
+                            item.count = item.count - moved
+                            if item.count <= 0 then
+                                break
+                            end
                         end
                     end
                 end
             end
 
-            -- Then try empty slots
+            -- Then try empty slots if items remain
             item = self.inputChest.getItemDetail(inputSlot)
             if item then
                 for targetSlot = 1, targetChest.peripheral.size() do
                     if not targetChest.peripheral.getItemDetail(targetSlot) then
-                        local moved = self.inputChest.pushItems(targetChest.name, inputSlot, item.count, targetSlot)
-                        if moved > 0 then
+                        -- pushItems: source peripheral pushes to target name
+                        local moved = self.inputChest.pushItems(targetName, inputSlot, item.count, targetSlot)
+
+                        if moved and moved > 0 then
                             deposited = true
                             totalMoved = totalMoved + moved
-                            self.logger:debug(string.format("Deposited %dx %s to empty", moved, item.displayName), "Storage")
+                            self.logger:debug(string.format("Deposited %dx %s to empty slot %d", moved, item.displayName, targetSlot), "Storage")
                             self.sound:play("minecraft:item.armor.equip_turtle", 1)
                             break
                         end
@@ -479,8 +494,10 @@ function StorageManager:depositFromInput(targetChest)
         end
     end
 
-    if deposited then
-        self.logger:info(string.format("Deposited %d items to %s", totalMoved, targetChest.name), "Storage")
+    if totalMoved > 0 then
+        self.logger:info(string.format("Successfully deposited %d items to %s", totalMoved, targetChest.name), "Storage")
+    else
+        self.logger:debug(string.format("No items deposited to %s", targetChest.name), "Storage")
     end
 
     return deposited
@@ -505,10 +522,21 @@ function StorageManager:processQueues()
         self.executor:submit("deposit", function()
             self.logger:info("Executing deposit for " .. chest.name, "Storage")
 
-            -- Actually perform the deposit!
-            local success = self:depositFromInput(chest)
+            -- Validate chest is still valid
+            if not chest.peripheral then
+                self.logger:error("Invalid chest peripheral for " .. chest.name, "Storage")
+                return
+            end
 
-            if success then
+            -- Actually perform the deposit!
+            local success = false
+            local ok, err = pcall(function()
+                success = self:depositFromInput(chest)
+            end)
+
+            if not ok then
+                self.logger:error(string.format("Deposit error for %s: %s", chest.name, tostring(err)), "Storage")
+            elseif success then
                 self.logger:success("Deposit complete for " .. chest.name, "Storage")
                 -- Schedule recalculation
                 self.calculate = true
