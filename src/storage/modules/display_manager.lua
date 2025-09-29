@@ -638,7 +638,7 @@ function DisplayManager:drawTaskIndicators()
     -- Redraw separator line
     self.monitor.setTextColor(colors.gray)
     for x = 1, w do
-        self.monitor.setCursorPos(x, separatorY-2)
+        self.monitor.setCursorPos(x, separatorY-1)
         self.monitor.write("_")
     end
 
