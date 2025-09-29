@@ -322,7 +322,7 @@ local function showAnimatedSplash()
     -- Final pause
     term.setCursorPos(math.floor((w - 23) / 2), h - 2)
     term.setTextColor(colors.lightGray)
-    term.write("Press any key to begin")
+    term.write("   Press any key to begin")
 
     os.pullEvent("key")
     clearScreen()
@@ -967,8 +967,8 @@ local function main()
         term.setCursorPos(2, 8)
         term.setTextColor(COLORS.info)
         print("[Y] Yes - Run startup script")
-        print("[N] No - Exit to shell")
-        print("[R] Reboot computer")
+        print(" [N] No - Exit to shell")
+        print(" [R] Reboot computer")
         term.setTextColor(COLORS.text)
 
         while true do

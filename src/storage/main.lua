@@ -112,14 +112,27 @@ end
 -- Main scheduler loop (ticks the ProcessManager so coroutines resume)
 local function main()
     init()
-    while running do
-        processManager:tick()
-        -- Pull event with no filter, short timeout
-        local event = {os.pullEventRaw(0.1)}
-        if event[1] == "terminate" then
-            break
-        end
-    end
+
+    -- Create a non-blocking event dispatcher
+    parallel.waitForAny(
+            function() -- Storage process
+                local StorageManager = require("modules.storage_manager")
+                local storage = StorageManager:new(logger, eventBus)
+                storage:run()
+            end,
+            function() -- Display process
+                local DisplayManager = require("modules.display_manager")
+                local display = DisplayManager:new(logger, eventBus)
+                display:run()
+            end,
+            function() -- Terminal process
+                local terminal = Terminal:new(APP_NAME, VERSION, logger)
+                terminal:run()
+            end,
+            function() -- API process
+                if api then api:run() end
+            end
+    )
 end
 
 -- Run with error handling
