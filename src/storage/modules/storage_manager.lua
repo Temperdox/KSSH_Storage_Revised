@@ -87,7 +87,8 @@ function StorageManager:registerEvents()
     end)
 
     self.eventBus:on("storage:check_deposit", function()
-        if not self.depositBusy then
+        -- Only set check flag if not busy and no deposit is forced
+        if not self.depositBusy and not self.forceDeposit then
             self.checkDeposit = true
         end
     end)
@@ -608,8 +609,6 @@ function StorageManager:depositLoop()
             local currentCount = self:getInputItemCount()
 
             if currentCount > 0 and self.emptySlots > 0 then
-                shouldDeposit = true
-
                 -- Check if we're stuck with same item count
                 if currentCount == self.lastDepositCount then
                     self.depositStuckCounter = self.depositStuckCounter + 1
@@ -645,17 +644,31 @@ function StorageManager:depositLoop()
             -- Only queue if not active and queue is empty
             if not depositActive and #self.depositQueue == 0 then
                 self.depositBusy = true
+
+                -- Get current item count before deposit
+                local beforeCount = self:getInputItemCount()
+                self.logger:info(string.format("Starting deposit of %d items", beforeCount), "Storage")
+
                 self:queueDeposit()
                 self.sound:play("minecraft:block.barrel.open", 1)
 
                 -- Schedule cleanup after deposits complete
                 self.executor:submit("deposit-cleanup", function()
-                    sleep(2)
+                    sleep(3)
+                    local afterCount = self:getInputItemCount()
+                    local movedCount = beforeCount - afterCount
+                    if movedCount > 0 then
+                        self.logger:success(string.format("Deposit complete: moved %d items", movedCount), "Storage")
+                    else
+                        self.logger:warning("No items were deposited", "Storage")
+                    end
                     self.depositBusy = false
                     self.calculate = true
                 end, 1)
             elseif depositActive then
                 self.logger:debug("Deposit already in progress", "Storage")
+            elseif #self.depositQueue > 0 then
+                self.logger:debug("Deposit queue not empty", "Storage")
             end
         end
 
@@ -703,10 +716,18 @@ function StorageManager:calculateLoop()
 end
 
 function StorageManager:processLoop()
+    local lastStatusUpdate = 0
     while self.running do
         self:processQueues()
         self.executor:tick()
-        self:updateTaskStatus()
+
+        -- Only update task status every 0.5 seconds to reduce spam
+        local now = os.epoch("utc")
+        if now - lastStatusUpdate > 500 then
+            self:updateTaskStatus()
+            lastStatusUpdate = now
+        end
+
         sleep(0.1)
     end
 end

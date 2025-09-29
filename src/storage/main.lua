@@ -19,7 +19,7 @@ local SoundManager   = require("modules.sound_manager")
 
 -- Initialize logger
 local logger = Logger:new("logs/storage.log")
-logger:setLevel(Logger.LEVELS.DEBUG) -- Enable debug for event tracking
+logger:setLevel(Logger.LEVELS.INFO) -- Set to INFO to reduce spam (can be changed to DEBUG if needed)
 _G.logger = logger
 
 -- Global singletons
@@ -109,12 +109,28 @@ local function init()
 
         -- Also handle items present event (for periodic checks)
         _G.eventBus:on("input:items_present", function(count)
-            -- Only trigger if we have empty slots and aren't already depositing
+            -- Only trigger periodic check if we have empty slots
             if storage.emptySlots > 0 then
                 _G.eventBus:emit("storage:check_deposit")
             end
         end, 5)
+    else
+        logger:warning("No input chest found - deposit monitoring disabled", "Main")
     end
+
+    -- Add terminal command to toggle debug logging
+    terminal:registerCommand("debug", function(args)
+        if args[1] == "on" then
+            logger:setLevel(Logger.LEVELS.DEBUG)
+            logger:info("Debug logging enabled")
+        elseif args[1] == "off" then
+            logger:setLevel(Logger.LEVELS.INFO)
+            logger:info("Debug logging disabled")
+        else
+            local currentLevel = logger.minLevel.name
+            logger:info("Current log level: " .. currentLevel .. " (use 'debug on' or 'debug off')")
+        end
+    end, "Toggle debug logging (on/off)")
 
     logger:info("All systems initialized")
 end
