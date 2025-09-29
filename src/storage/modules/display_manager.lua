@@ -380,33 +380,60 @@ function DisplayManager:drawButtons()
     local reloadText = "[RELOAD]"
     local sortText = "[SORT]"
     local reformatText = "[REFORMAT]"
+    local depositText = "[DEPOSIT]"  -- Add deposit text
 
     if w <= 18 then
         reloadText = "RL"
         sortText = "ST"
         reformatText = "RF"
+        depositText = "DP"
     elseif w <= 36 then
         reloadText = "RLD"
         sortText = "SRT"
         reformatText = "RFM"
+        depositText = "DPS"
     end
 
+    -- Draw reload button
     self.monitor.setCursorPos(1, h - 1)
     self.monitor.setTextColor(colors.cyan)
     self.monitor.write(reloadText)
 
+    -- Draw sort button
     self.monitor.setCursorPos(2 + string.len(reloadText), h - 1)
     self.monitor.setTextColor(colors.green)
     self.monitor.write(sortText)
 
+    -- Draw reformat button
     self.monitor.setCursorPos(3 + string.len(reloadText) + string.len(sortText), h - 1)
     self.monitor.setTextColor(colors.purple)
     self.monitor.write(reformatText)
 
+    -- Draw deposit indicator (shows status, not a button)
+    self.monitor.setCursorPos(4 + string.len(reloadText) + string.len(sortText) + string.len(reformatText), h - 1)
+
+    -- Check if deposit is active
+    local depositActive = false
+    if self.depositQueue > 0 or #self.depositThreads > 0 then
+        for _, thread in ipairs(self.depositThreads) do
+            if thread.active then
+                depositActive = true
+                break
+            end
+        end
+    end
+
+    if depositActive then
+        self.monitor.setTextColor(colors.orange)
+    else
+        self.monitor.setTextColor(colors.gray)
+    end
+    self.monitor.write(depositText)
+
     -- Order controls if item selected
     if self.selectedItem then
         -- Item name
-        self.monitor.setCursorPos(w - 2 - string.len(self.selectedItem.item.displayName), h - 4)
+        self.monitor.setCursorPos(math.max(1, w - 2 - string.len(self.selectedItem.item.displayName)), h - 4)
         self.monitor.setTextColor(colors.purple)
         self.monitor.write(self.selectedItem.item.displayName)
 
@@ -423,7 +450,7 @@ function DisplayManager:drawButtons()
         self.monitor.setTextColor(colors.yellow)
         self.monitor.write("<")
 
-        self.monitor.setCursorPos(w - 6 - string.len(tostring(self.desiredAmount)) / 2, h - 3)
+        self.monitor.setCursorPos(math.max(1, w - 6 - string.len(tostring(self.desiredAmount)) / 2), h - 3)
         self.monitor.setTextColor(colors.white)
         self.monitor.write(tostring(self.desiredAmount))
 
@@ -440,7 +467,7 @@ function DisplayManager:drawButtons()
         self.monitor.write(">")
 
         -- Order button
-        self.monitor.setCursorPos(w - 10, h - 2)
+        self.monitor.setCursorPos(math.max(1, w - 10), h - 2)
         self.monitor.setTextColor(colors.blue)
         self.monitor.write("[ORDER]")
     end

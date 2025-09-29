@@ -16,8 +16,9 @@ function Terminal:new(appName, version, logger)
     self.cursorPos = 1
     self.scrollOffset = 0
     self.logLines = {}
-    self.maxLogLines = 100
+    self.maxLogLines = 50  -- Reduced from 100 to prevent lag
     self.running = true
+    self.autoScroll = true  -- Auto-scroll by default
 
     -- Register default commands
     self:registerDefaultCommands()
@@ -50,6 +51,19 @@ function Terminal:registerDefaultCommands()
         self.logLines = {}
         self.scrollOffset = 0
     end, "Clear the console")
+
+    self:registerCommand("autoscroll", function(args)
+        if args[1] == "on" then
+            self.autoScroll = true
+            self.logger:info("Auto-scroll enabled")
+        elseif args[1] == "off" then
+            self.autoScroll = false
+            self.logger:info("Auto-scroll disabled")
+        else
+            self.autoScroll = not self.autoScroll
+            self.logger:info("Auto-scroll " .. (self.autoScroll and "enabled" or "disabled"))
+        end
+    end, "Toggle auto-scroll (on/off)")
 
     self:registerCommand("status", function(args)
         local statuses = _G.processManager:getAllStatus()
@@ -119,14 +133,20 @@ function Terminal:addLogLine(entry)
     }
 
     table.insert(self.logLines, line)
-    if #self.logLines > self.maxLogLines then
+
+    -- Keep only the last maxLogLines entries
+    while #self.logLines > self.maxLogLines do
         table.remove(self.logLines, 1)
+        -- Adjust scroll offset if we removed lines above current view
+        if self.scrollOffset > 0 then
+            self.scrollOffset = self.scrollOffset - 1
+        end
     end
 
-    -- Auto-scroll if at bottom
-    local w, h = term.getSize()
-    local consoleHeight = h - 4
-    if self.scrollOffset >= #self.logLines - consoleHeight then
+    -- Auto-scroll to bottom if enabled
+    if self.autoScroll then
+        local w, h = term.getSize()
+        local consoleHeight = h - 4
         self.scrollOffset = math.max(0, #self.logLines - consoleHeight)
     end
 end
@@ -144,10 +164,17 @@ function Terminal:drawHeader()
     term.setCursorPos(2, 1)
     term.write(self.appName .. " v" .. self.version)
 
-    -- Settings button
-    term.setCursorPos(w - 10, 1)
-    term.setBackgroundColor(colors.lightGray)
-    term.write(" Settings ")
+    -- Log count indicator
+    term.setCursorPos(w - 15, 1)
+    term.setBackgroundColor(colors.gray)
+    term.setTextColor(colors.lightGray)
+    term.write("[" .. #self.logLines .. "/" .. self.maxLogLines .. "]")
+
+    -- Auto-scroll indicator
+    if self.autoScroll then
+        term.setTextColor(colors.lime)
+        term.write(" [AS]")
+    end
 
     term.setBackgroundColor(colors.black)
 end
@@ -172,8 +199,32 @@ function Terminal:drawConsole()
             local y = 2 + (i - startIdx)
             term.setCursorPos(1, y)
             term.setTextColor(line.color)
-            term.write(line.text:sub(1, w))
+
+            -- Truncate long lines to prevent wrapping
+            local maxWidth = w - 1
+            local displayText = line.text
+            if #displayText > maxWidth then
+                displayText = displayText:sub(1, maxWidth - 3) .. "..."
+            end
+            term.write(displayText)
         end
+    end
+
+    -- Draw scroll bar if needed
+    if #self.logLines > consoleHeight then
+        local barHeight = math.max(1, math.floor(consoleHeight * consoleHeight / #self.logLines))
+        local barPos = math.floor((self.scrollOffset / (#self.logLines - consoleHeight)) * (consoleHeight - barHeight))
+
+        for y = 2, h - 2 do
+            term.setCursorPos(w, y)
+            if y >= 2 + barPos and y < 2 + barPos + barHeight then
+                term.setBackgroundColor(colors.gray)
+            else
+                term.setBackgroundColor(colors.black)
+            end
+            term.write(" ")
+        end
+        term.setBackgroundColor(colors.black)
     end
 
     term.setTextColor(colors.white)
@@ -193,12 +244,22 @@ function Terminal:drawInputArea()
     term.write("> ")
     term.setTextColor(colors.white)
 
-    -- Draw current input
-    local inputDisplay = self.currentInput:sub(math.max(1, self.cursorPos - w + 4), self.cursorPos + w)
+    -- Draw current input (handle long input with scrolling)
+    local maxInputWidth = w - 3
+    local inputDisplay = self.currentInput
+
+    if #self.currentInput > maxInputWidth then
+        -- Scroll the input to keep cursor visible
+        local scrollStart = math.max(1, self.cursorPos - maxInputWidth + 1)
+        inputDisplay = self.currentInput:sub(scrollStart, scrollStart + maxInputWidth - 1)
+    end
+
     term.write(inputDisplay)
 
     -- Position cursor
-    term.setCursorPos(2 + math.min(self.cursorPos, w - 3), h)
+    local cursorX = 3 + math.min(self.cursorPos - 1, maxInputWidth - 1)
+    term.setCursorPos(cursorX, h)
+    term.setCursorBlink(true)
 end
 
 function Terminal:draw()
@@ -213,6 +274,10 @@ function Terminal:handleKey(key)
         if self.currentInput:len() > 0 then
             self:executeCommand(self.currentInput)
             table.insert(self.commandHistory, self.currentInput)
+            -- Limit command history
+            while #self.commandHistory > 50 do
+                table.remove(self.commandHistory, 1)
+            end
             self.historyIndex = #self.commandHistory + 1
             self.currentInput = ""
             self.cursorPos = 1
@@ -253,11 +318,23 @@ function Terminal:handleKey(key)
             self.cursorPos = 1
         end
     elseif key == keys.pageUp then
+        self.autoScroll = false
         self.scrollOffset = math.max(0, self.scrollOffset - 5)
     elseif key == keys.pageDown then
         local w, h = term.getSize()
         local maxScroll = math.max(0, #self.logLines - (h - 4))
         self.scrollOffset = math.min(maxScroll, self.scrollOffset + 5)
+        -- Re-enable autoscroll if we scroll to bottom
+        if self.scrollOffset >= maxScroll then
+            self.autoScroll = true
+        end
+    elseif key == keys.home then
+        self.autoScroll = false
+        self.scrollOffset = 0
+    elseif key == keys["end"] then
+        local w, h = term.getSize()
+        self.scrollOffset = math.max(0, #self.logLines - (h - 4))
+        self.autoScroll = true
     elseif key == keys.tab then
         self:handleAutocomplete()
     end
@@ -357,26 +434,24 @@ function Terminal:run()
             self:handleKey(p1)
         elseif event == "char" then
             self:handleChar(p1)
-        elseif event == "mouse_click" then
-            local x, y = p2, p3
-            local w, h = term.getSize()
-
-            -- Check if settings button clicked
-            if y == 1 and x >= w - 10 and x <= w - 1 then
-                _G.eventBus:emit("ui:settings")
-                self.logger:info("Opening settings...")
-            end
         elseif event == "mouse_scroll" then
             local direction = p1
+            self.autoScroll = false  -- Disable auto-scroll when manually scrolling
             if direction == -1 then
                 self.scrollOffset = math.max(0, self.scrollOffset - 1)
             else
                 local w, h = term.getSize()
                 local maxScroll = math.max(0, #self.logLines - (h - 4))
                 self.scrollOffset = math.min(maxScroll, self.scrollOffset + 1)
+                -- Re-enable autoscroll if we scroll to bottom
+                if self.scrollOffset >= maxScroll then
+                    self.autoScroll = true
+                end
             end
         end
     end
+
+    term.setCursorBlink(false)
 end
 
 return Terminal
