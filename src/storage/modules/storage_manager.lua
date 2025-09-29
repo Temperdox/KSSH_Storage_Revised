@@ -1,10 +1,9 @@
 -- modules/storage_manager.lua
--- Core storage management logic - COMPLETE FIXED VERSION
+-- Core storage management logic - COMPLETE WORKING VERSION
 
 local StorageManager = {}
 StorageManager.__index = StorageManager
 
-local TaskExecutor = require("modules.task_executor")
 local InventoryScanner = require("modules.inventory_scanner")
 local SoundManager = require("modules.sound_manager")
 
@@ -16,7 +15,6 @@ function StorageManager:new(logger, eventBus)
 
     -- Initialize components
     self.scanner = InventoryScanner:new(logger)
-    self.executor = TaskExecutor:new(logger, 16)
     self.sound = SoundManager:new(logger)
 
     -- Storage data
@@ -180,18 +178,15 @@ end
 function StorageManager:updateTaskStatus()
     -- Send detailed task status to display
     self.eventBus:emit("task:status", "sort", {
-        queue = #self.sortQueue,
-        threads = self.executor:getStatus().threads
+        queue = #self.sortQueue
     })
 
     self.eventBus:emit("task:status", "deposit", {
-        queue = #self.depositQueue,
-        threads = self.executor:getStatus().threads
+        queue = #self.depositQueue
     })
 
     self.eventBus:emit("task:status", "reformat", {
-        queue = #self.reformatQueue,
-        threads = self.executor:getStatus().threads
+        queue = #self.reformatQueue
     })
 
     self.eventBus:emit("task:status", "order", {
@@ -527,97 +522,103 @@ function StorageManager:processQueues()
     -- Process sort queue
     if #self.sortQueue > 0 then
         local task = table.remove(self.sortQueue, 1)
-        self.executor:submit("sort", function()
-            self.logger:info("Executing sort for " .. task.chest.name, "Storage")
+        -- Execute directly instead of through executor
+        self.logger:info("Executing sort for " .. task.chest.name, "Storage")
+        local ok, err = pcall(function()
             self:sortChest(task.chest.peripheral, task.chest.name, task.consolidate)
-            self.logger:success("Sort complete for " .. task.chest.name, "Storage")
-            self.eventBus:emit("storage:sort_complete", task.chest.name)
         end)
+        if ok then
+            self.logger:success("Sort complete for " .. task.chest.name, "Storage")
+        else
+            self.logger:error("Sort error: " .. tostring(err), "Storage")
+        end
+        self.eventBus:emit("storage:sort_complete", task.chest.name)
         self:updateTaskStatus()
     end
 
-    -- Process deposit queue - FIXED with proper execution
+    -- Process deposit queue - DIRECT EXECUTION
     if #self.depositQueue > 0 and self.inputChest then
         local chest = table.remove(self.depositQueue, 1)
-        self.executor:submit("deposit", function()
-            self.logger:info("Executing deposit for " .. chest.name, "Storage")
+        self.logger:info("Executing deposit for " .. chest.name, "Storage")
 
-            -- Validate chest is still valid
-            if not chest.peripheral then
-                self.logger:error("Invalid chest peripheral for " .. chest.name, "Storage")
-                return
-            end
+        -- Validate chest is still valid
+        if not chest.peripheral then
+            self.logger:error("Invalid chest peripheral for " .. chest.name, "Storage")
+            return
+        end
 
-            -- Actually perform the deposit!
-            local success = false
-            local ok, err = pcall(function()
-                success = self:depositFromInput(chest)
-            end)
-
-            if not ok then
-                self.logger:error(string.format("Deposit error for %s: %s", chest.name, tostring(err)), "Storage")
-            elseif success then
-                self.logger:success("Deposit complete for " .. chest.name, "Storage")
-                -- Schedule recalculation
-                self.calculate = true
-            else
-                self.logger:debug("No items deposited to " .. chest.name, "Storage")
-            end
+        -- DIRECTLY CALL depositFromInput
+        local success = false
+        local ok, err = pcall(function()
+            success = self:depositFromInput(chest)
         end)
+
+        if not ok then
+            self.logger:error(string.format("Deposit error for %s: %s", chest.name, tostring(err)), "Storage")
+        elseif success then
+            self.logger:success("Deposit complete for " .. chest.name, "Storage")
+            self.calculate = true
+        else
+            self.logger:debug("No items deposited to " .. chest.name, "Storage")
+        end
+
         self:updateTaskStatus()
     end
 
     -- Process reformat queue
     if #self.reformatQueue > 0 then
         local chest = table.remove(self.reformatQueue, 1)
-        self.executor:submit("reformat", function()
-            self.logger:info("Executing reformat for " .. chest.name, "Storage")
+        self.logger:info("Executing reformat for " .. chest.name, "Storage")
+        local ok, err = pcall(function()
             self:sortChest(chest.peripheral, chest.name, true)
+        end)
+        if ok then
             self.logger:success("Reformat complete for " .. chest.name, "Storage")
             self.calculate = true
-        end)
+        else
+            self.logger:error("Reformat error: " .. tostring(err), "Storage")
+        end
         self:updateTaskStatus()
     end
 
     -- Process order queue
     if #self.orderQueue > 0 and self.outputChest then
         local order = table.remove(self.orderQueue, 1)
-        self.executor:submit("order", function()
-            self.logger:info(string.format("Processing order: %dx %s", order.amount, order.item.displayName), "Storage")
+        self.logger:info(string.format("Processing order: %dx %s", order.amount, order.item.displayName), "Storage")
 
-            local remaining = order.amount
-            local moved = 0
+        local remaining = order.amount
+        local moved = 0
 
-            -- Find items in storage
-            for _, chest in ipairs(self.storageChests) do
-                if remaining <= 0 then break end
+        -- Find items in storage
+        for _, chest in ipairs(self.storageChests) do
+            if remaining <= 0 then break end
 
-                for slot = 1, chest.peripheral.size() do
-                    local item = chest.peripheral.getItemDetail(slot)
-                    if item and item.name == order.item.name then
-                        local toMove = math.min(remaining, item.count)
-                        local actualMoved = chest.peripheral.pushItems(
-                                peripheral.getName(self.outputChest),
-                                slot, toMove
-                        )
-                        if actualMoved > 0 then
-                            moved = moved + actualMoved
-                            remaining = remaining - actualMoved
-                            self.logger:debug(string.format("Moved %d items from %s", actualMoved, chest.name), "Storage")
-                        end
+            for slot = 1, chest.peripheral.size() do
+                local item = chest.peripheral.getItemDetail(slot)
+                if item and item.name == order.item.name then
+                    local toMove = math.min(remaining, item.count)
+                    local actualMoved = chest.peripheral.pushItems(
+                            peripheral.getName(self.outputChest),
+                            slot, toMove
+                    )
+                    if actualMoved > 0 then
+                        moved = moved + actualMoved
+                        remaining = remaining - actualMoved
+                        self.logger:debug(string.format("Moved %d items from %s", actualMoved, chest.name), "Storage")
                     end
                 end
             end
+        end
 
-            if moved > 0 then
-                self.logger:success(string.format("Order complete: %d/%d %s delivered", moved, order.amount, order.item.displayName), "Storage")
-                self.sound:play("minecraft:block.note_block.chime", 1)
-                self.calculate = true
-            else
-                self.logger:error(string.format("Order failed: %s not found", order.item.displayName), "Storage")
-                self.sound:play("minecraft:block.note_block.bass", 0.5)
-            end
-        end)
+        if moved > 0 then
+            self.logger:success(string.format("Order complete: %d/%d %s delivered", moved, order.amount, order.item.displayName), "Storage")
+            self.sound:play("minecraft:block.note_block.chime", 1)
+            self.calculate = true
+        else
+            self.logger:error(string.format("Order failed: %s not found", order.item.displayName), "Storage")
+            self.sound:play("minecraft:block.note_block.bass", 0.5)
+        end
+
         self:updateTaskStatus()
     end
 end
@@ -680,20 +681,8 @@ function StorageManager:depositLoop()
 
         -- Process deposit if needed
         if shouldDeposit and self.inputChest and self.emptySlots > 0 then
-            -- Check if deposit is already active
-            local depositActive = false
-            local status = self.executor:getStatus()
-
-            -- Check for active deposit threads
-            for _, thread in ipairs(status.threads) do
-                if thread.active and thread.currentTask and thread.currentTask.type == "deposit" then
-                    depositActive = true
-                    break
-                end
-            end
-
-            -- Only queue if not busy, not active and queue is empty
-            if not self.depositBusy and not depositActive and #self.depositQueue == 0 then
+            -- Only queue if not busy and queue is empty
+            if not self.depositBusy and #self.depositQueue == 0 then
                 self.depositBusy = true
 
                 -- Get current item count before deposit
@@ -704,23 +693,25 @@ function StorageManager:depositLoop()
                 self:queueDeposit()
                 self.sound:play("minecraft:block.barrel.open", 1)
 
-                -- Schedule cleanup after deposits should be complete (allow more time)
-                self.executor:submit("deposit-cleanup", function()
-                    sleep(5) -- Give more time for deposits to complete
-                    local afterCount = self:getInputItemCount()
-                    local movedCount = beforeCount - afterCount
-                    if movedCount > 0 then
-                        self.logger:success(string.format("Deposit complete: moved %d items", movedCount), "Storage")
-                    else
-                        self.logger:warning("No items were deposited - check connections", "Storage")
-                    end
-                    self.depositBusy = false
-                    self.calculate = true
-                end, 1)
+                -- Mark as not busy after a delay
+                local timer = os.startTimer(5)
+                local event, p1
+                repeat
+                    event, p1 = os.pullEvent("timer")
+                until p1 == timer
+
+                local afterCount = self:getInputItemCount()
+                local movedCount = beforeCount - afterCount
+                if movedCount > 0 then
+                    self.logger:success(string.format("Deposit cycle complete: moved %d items", movedCount), "Storage")
+                else
+                    self.logger:warning("No items were deposited - check connections", "Storage")
+                end
+                self.depositBusy = false
+                self.calculate = true
+
             elseif self.depositBusy then
                 self.logger:debug("Deposit busy flag is set", "Storage")
-            elseif depositActive then
-                self.logger:debug("Deposit already in progress", "Storage")
             elseif #self.depositQueue > 0 then
                 self.logger:debug(string.format("Deposit queue not empty: %d items", #self.depositQueue), "Storage")
             end
@@ -772,8 +763,8 @@ end
 function StorageManager:processLoop()
     local lastStatusUpdate = 0
     while self.running do
+        -- Process queues directly without executor
         self:processQueues()
-        self.executor:tick()
 
         -- Only update task status every 0.5 seconds to reduce spam
         local now = os.epoch("utc")
