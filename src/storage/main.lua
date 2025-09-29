@@ -138,6 +138,17 @@ local function init()
         _G.eventBus:emit("storage:trigger_deposit")
     end, "Manually trigger deposit from input chest")
 
+    -- Add terminal command to reset deposit state
+    terminal:registerCommand("reset", function(args)
+        logger:info("Resetting deposit state...")
+        if storage then
+            storage.depositBusy = false
+            storage.depositQueue = {}
+            storage.depositStuckCounter = 0
+            logger:success("Deposit state reset - try deposit command again")
+        end
+    end, "Reset stuck deposit state")
+
     logger:info("All systems initialized")
 end
 

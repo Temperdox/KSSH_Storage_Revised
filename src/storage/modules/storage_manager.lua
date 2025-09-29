@@ -641,7 +641,7 @@ function StorageManager:depositLoop()
         if self.forceDeposit then
             shouldDeposit = true
             self.forceDeposit = false
-            self.depositStuckCounter = 0 -- Reset stuck counter
+            self.depositStuckCounter = 0
             self.logger:info("Processing forced deposit from input monitor", "Storage")
         end
 
@@ -664,6 +664,8 @@ function StorageManager:depositLoop()
                         self.logger:warning(string.format("Deposit appears stuck with %d items, forcing retry", currentCount), "Storage")
                         shouldDeposit = true
                         self.depositStuckCounter = 0
+                        -- Clear deposit busy flag to allow retry
+                        self.depositBusy = false
                     end
                 else
                     self.depositStuckCounter = 0
@@ -682,6 +684,7 @@ function StorageManager:depositLoop()
             local depositActive = false
             local status = self.executor:getStatus()
 
+            -- Check for active deposit threads
             for _, thread in ipairs(status.threads) do
                 if thread.active and thread.currentTask and thread.currentTask.type == "deposit" then
                     depositActive = true
@@ -689,34 +692,37 @@ function StorageManager:depositLoop()
                 end
             end
 
-            -- Only queue if not active and queue is empty
-            if not depositActive and #self.depositQueue == 0 then
+            -- Only queue if not busy, not active and queue is empty
+            if not self.depositBusy and not depositActive and #self.depositQueue == 0 then
                 self.depositBusy = true
 
                 -- Get current item count before deposit
                 local beforeCount = self:getInputItemCount()
                 self.logger:info(string.format("Starting deposit of %d items", beforeCount), "Storage")
 
+                -- Queue deposit tasks
                 self:queueDeposit()
                 self.sound:play("minecraft:block.barrel.open", 1)
 
-                -- Schedule cleanup after deposits complete
+                -- Schedule cleanup after deposits should be complete (allow more time)
                 self.executor:submit("deposit-cleanup", function()
-                    sleep(3)
+                    sleep(5) -- Give more time for deposits to complete
                     local afterCount = self:getInputItemCount()
                     local movedCount = beforeCount - afterCount
                     if movedCount > 0 then
                         self.logger:success(string.format("Deposit complete: moved %d items", movedCount), "Storage")
                     else
-                        self.logger:warning("No items were deposited", "Storage")
+                        self.logger:warning("No items were deposited - check connections", "Storage")
                     end
                     self.depositBusy = false
                     self.calculate = true
                 end, 1)
+            elseif self.depositBusy then
+                self.logger:debug("Deposit busy flag is set", "Storage")
             elseif depositActive then
                 self.logger:debug("Deposit already in progress", "Storage")
             elseif #self.depositQueue > 0 then
-                self.logger:debug("Deposit queue not empty", "Storage")
+                self.logger:debug(string.format("Deposit queue not empty: %d items", #self.depositQueue), "Storage")
             end
         end
 
