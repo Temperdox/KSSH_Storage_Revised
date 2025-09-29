@@ -430,7 +430,15 @@ function StorageManager:consolidateChest(chest, name)
 end
 
 function StorageManager:depositFromInput(targetChest)
+    self.logger:debug(string.format("depositFromInput called for %s", targetChest.name), "Storage")
+
     if not self.inputChest then
+        self.logger:error("No input chest available", "Storage")
+        return false
+    end
+
+    if not targetChest or not targetChest.peripheral then
+        self.logger:error(string.format("Invalid target chest: %s", tostring(targetChest.name)), "Storage")
         return false
     end
 
@@ -440,9 +448,13 @@ function StorageManager:depositFromInput(targetChest)
     -- Get the proper peripheral name for the target chest
     local targetName = targetChest.name  -- This should already be the peripheral name like "minecraft:barrel_18"
 
+    self.logger:debug(string.format("Starting deposit scan from input to %s", targetName), "Storage")
+
     for inputSlot = 1, self.inputChest.size() do
         local item = self.inputChest.getItemDetail(inputSlot)
         if item then
+            self.logger:debug(string.format("Found %dx %s in slot %d", item.count, item.displayName or item.name, inputSlot), "Storage")
+
             -- Try to stack with existing items first
             if item.maxCount > 1 then
                 for targetSlot = 1, targetChest.peripheral.size() do
@@ -454,13 +466,15 @@ function StorageManager:depositFromInput(targetChest)
                         local space = targetItem.maxCount - targetItem.count
                         local toMove = math.min(space, item.count)
 
+                        self.logger:debug(string.format("Attempting to stack %d items to slot %d", toMove, targetSlot), "Storage")
+
                         -- pushItems: source peripheral pushes to target name
                         local moved = self.inputChest.pushItems(targetName, inputSlot, toMove, targetSlot)
 
                         if moved and moved > 0 then
                             deposited = true
                             totalMoved = totalMoved + moved
-                            self.logger:debug(string.format("Stacked %dx %s to slot %d", moved, item.displayName, targetSlot), "Storage")
+                            self.logger:info(string.format("Stacked %dx %s to slot %d", moved, item.displayName or item.name, targetSlot), "Storage")
                             self.sound:play("minecraft:item.armor.equip_diamond", 1)
 
                             -- Update item count
@@ -468,6 +482,8 @@ function StorageManager:depositFromInput(targetChest)
                             if item.count <= 0 then
                                 break
                             end
+                        else
+                            self.logger:debug("Failed to stack items", "Storage")
                         end
                     end
                 end
@@ -478,15 +494,19 @@ function StorageManager:depositFromInput(targetChest)
             if item then
                 for targetSlot = 1, targetChest.peripheral.size() do
                     if not targetChest.peripheral.getItemDetail(targetSlot) then
+                        self.logger:debug(string.format("Attempting to move %d items to empty slot %d", item.count, targetSlot), "Storage")
+
                         -- pushItems: source peripheral pushes to target name
                         local moved = self.inputChest.pushItems(targetName, inputSlot, item.count, targetSlot)
 
                         if moved and moved > 0 then
                             deposited = true
                             totalMoved = totalMoved + moved
-                            self.logger:debug(string.format("Deposited %dx %s to empty slot %d", moved, item.displayName, targetSlot), "Storage")
+                            self.logger:info(string.format("Deposited %dx %s to empty slot %d", moved, item.displayName or item.name, targetSlot), "Storage")
                             self.sound:play("minecraft:item.armor.equip_turtle", 1)
                             break
+                        else
+                            self.logger:debug("Failed to move to empty slot", "Storage")
                         end
                     end
                 end
@@ -495,9 +515,9 @@ function StorageManager:depositFromInput(targetChest)
     end
 
     if totalMoved > 0 then
-        self.logger:info(string.format("Successfully deposited %d items to %s", totalMoved, targetChest.name), "Storage")
+        self.logger:success(string.format("Successfully deposited %d items to %s", totalMoved, targetChest.name), "Storage")
     else
-        self.logger:debug(string.format("No items deposited to %s", targetChest.name), "Storage")
+        self.logger:warning(string.format("No items deposited to %s", targetChest.name), "Storage")
     end
 
     return deposited

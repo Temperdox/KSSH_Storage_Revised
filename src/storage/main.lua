@@ -132,6 +132,12 @@ local function init()
         end
     end, "Toggle debug logging (on/off)")
 
+    -- Add terminal command to manually trigger deposit
+    terminal:registerCommand("deposit", function(args)
+        logger:info("Manually triggering deposit...")
+        _G.eventBus:emit("storage:trigger_deposit")
+    end, "Manually trigger deposit from input chest")
+
     logger:info("All systems initialized")
 end
 
