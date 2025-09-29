@@ -204,6 +204,7 @@ local function showProgress(title, message, percent, color)
     -- Progress bar
     term.setCursorPos(barX, barY)
     term.write("[")
+    local filled = math.floor(barWidth * (percent / 100))  -- This line was missing!
     term.setTextColor(COLORS.success)
     term.write(string.rep("=", filled))
     term.setTextColor(COLORS.text)
