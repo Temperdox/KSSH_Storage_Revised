@@ -1,6 +1,6 @@
 -- main.lua
 -- Storage System v2.0.0
--- Main entry point and process manager
+-- Main entry point with input monitoring
 
 local VERSION  = "2.0.0"
 local APP_NAME = "Storage System"
@@ -14,21 +14,26 @@ local Config         = require("modules.config")
 local API            = require("modules.api")
 local StorageManager = require("modules.storage_manager")
 local DisplayManager = require("modules.display_manager")
+local InputMonitor   = require("modules.input_monitor")
+local SoundManager   = require("modules.sound_manager")
 
 -- Initialize logger
 local logger = Logger:new("logs/storage.log")
+logger:setLevel(Logger.LEVELS.DEBUG) -- Enable debug for event tracking
 _G.logger = logger
 
 -- Global singletons
 _G.processManager = ProcessManager:new()
 _G.eventBus       = EventBus:new()
 _G.config         = Config:new()
+_G.sound          = SoundManager:new(logger)
 
 -- Process references
 local terminal = nil
 local storage = nil
 local display = nil
 local api = nil
+local inputMonitor = nil
 
 -- Running flag
 local running = true
@@ -39,6 +44,11 @@ local function shutdown()
     running = false
 
     logger:info("Initiating graceful shutdown...")
+
+    -- Stop input monitor
+    if inputMonitor then
+        pcall(function() inputMonitor:stop() end)
+    end
 
     -- Stop all processes
     _G.processManager:stopAll()
@@ -87,23 +97,23 @@ local function init()
         api = API:new(logger, _G.eventBus, _G.config:get("api.port", 9001))
     end
 
-    -- Register processes with ProcessManager
-    _G.processManager:register("terminal", function()
-        terminal:run()
-    end)
+    -- Initialize input monitor if we have an input chest
+    if storage.inputChest then
+        inputMonitor = InputMonitor:new(logger, _G.eventBus, storage.inputChest)
 
-    _G.processManager:register("storage", function()
-        storage:run()
-    end)
+        -- Register event handler for when items are detected
+        _G.eventBus:on("input:items_detected", function(count)
+            logger:info(string.format("Input monitor detected %d items, triggering deposit", count), "Main")
+            _G.eventBus:emit("storage:trigger_deposit")
+        end, 10) -- High priority
 
-    _G.processManager:register("display", function()
-        display:run()
-    end)
-
-    if api then
-        _G.processManager:register("api", function()
-            api:run()
-        end)
+        -- Also handle items present event (for periodic checks)
+        _G.eventBus:on("input:items_present", function(count)
+            -- Only trigger if we have empty slots and aren't already depositing
+            if storage.emptySlots > 0 then
+                _G.eventBus:emit("storage:check_deposit")
+            end
+        end, 5)
     end
 
     logger:info("All systems initialized")
@@ -113,7 +123,7 @@ end
 local function main()
     init()
 
-    -- Run all processes in parallel using ProcessManager
+    -- Run all processes in parallel
     local processes = {}
 
     -- Terminal process
@@ -136,6 +146,13 @@ local function main()
             display:run()
         end
     end)
+
+    -- Input monitor process (separate high-priority monitor)
+    if inputMonitor then
+        table.insert(processes, function()
+            inputMonitor:run()
+        end)
+    end
 
     -- API process
     if api then

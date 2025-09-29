@@ -71,6 +71,19 @@ function StorageManager:registerEvents()
         self.reformat = true
     end)
 
+    -- NEW: Handle input monitor events
+    self.eventBus:on("storage:trigger_deposit", function()
+        self.logger:info("Deposit triggered by input monitor", "Storage")
+        self.forceDeposit = true
+    end)
+
+    self.eventBus:on("storage:check_deposit", function()
+        -- Periodic check, only if not busy
+        if not self.depositBusy then
+            self.checkDeposit = true
+        end
+    end)
+
     self.eventBus:on("storage:order", function(item, amount)
         table.insert(self.orderQueue, {
             item = item,
@@ -92,6 +105,80 @@ function StorageManager:registerEvents()
     self.eventBus:on("process:stop:storage", function()
         self.running = false
     end)
+end
+
+function StorageManager:depositLoop()
+    -- Add new flags
+    self.forceDeposit = false
+    self.checkDeposit = false
+    self.depositBusy = false
+
+    while self.running do
+        local shouldDeposit = false
+
+        -- Check if forced by input monitor
+        if self.forceDeposit then
+            shouldDeposit = true
+            self.forceDeposit = false
+            self.logger:info("Processing forced deposit from input monitor", "Storage")
+        end
+
+        -- Check periodic flag
+        if self.checkDeposit then
+            shouldDeposit = true
+            self.checkDeposit = false
+        end
+
+        -- Original check (backup)
+        if self.inputChest and not shouldDeposit then
+            local inputFull = 0
+            for k,v in pairs(self.inputChest.list()) do
+                inputFull = inputFull + 1
+            end
+
+            if inputFull > 0 and self.emptySlots > 0 then
+                shouldDeposit = true
+                self.logger:debug("Deposit check found items in input", "Storage")
+            end
+        end
+
+        -- Process deposit if needed
+        if shouldDeposit and self.inputChest and self.emptySlots > 0 then
+            -- Check if deposit threads are already active
+            local active = false
+            local status = self.executor:getStatus()
+            for _, thread in ipairs(status.threads) do
+                if thread.active and thread.currentTask and
+                        thread.currentTask.type == "deposit" then
+                    active = true
+                    break
+                end
+            end
+
+            if not active and #self.depositQueue == 0 then
+                self.depositBusy = true
+
+                -- Sort input chest first
+                self.logger:info("Sorting input chest before deposit", "Storage")
+                self:sortChest(self.inputChest, "input", false)
+
+                -- Queue deposit for all storage chests
+                self:queueDeposit()
+
+                -- Play sound feedback
+                self.sound:play("minecraft:block.barrel.open", 1)
+
+                -- Schedule busy flag reset
+                self.executor:submit("deposit-cleanup", function()
+                    sleep(2) -- Wait for deposits to complete
+                    self.depositBusy = false
+                    self.calculate = true -- Trigger recalculation
+                end, 1) -- Low priority
+            end
+        end
+
+        sleep(0.5) -- Check twice per second
+    end
 end
 
 function StorageManager:scanPeripherals()
