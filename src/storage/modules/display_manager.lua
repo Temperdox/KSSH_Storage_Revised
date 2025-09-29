@@ -677,7 +677,7 @@ function DisplayManager:drawTaskIndicators()
         for i = 1, math.min(#self.reloadLog, maxBarHeight) do
             local barY = threadY - i
             if barY > separatorY then  -- Don't draw above separator
-                self.monitor.setCursorPos(1, barY)
+                self.monitor.setCursorPos(1, barY+1)
                 self.monitor.setTextColor(colors.cyan)
                 self.monitor.write("\138")
             end
@@ -707,7 +707,7 @@ function DisplayManager:drawTaskIndicators()
                 for j = 1, math.min(#self.sortThreads[i].log, maxBarHeight) do
                     local barY = threadY - j
                     if barY > separatorY then
-                        self.monitor.setCursorPos(sortX + threadNum, barY)
+                        self.monitor.setCursorPos(sortX + threadNum, barY+1)
                         self.monitor.setTextColor(threadColor)
                         self.monitor.write("\138")
                     end
@@ -742,7 +742,7 @@ function DisplayManager:drawTaskIndicators()
                 for j = 1, math.min(#self.reformatThreads[i].log, maxBarHeight) do
                     local barY = threadY - j
                     if barY > separatorY then
-                        self.monitor.setCursorPos(reformatX + threadNum, barY)
+                        self.monitor.setCursorPos(reformatX + threadNum, barY+1)
                         self.monitor.setTextColor(threadColor)
                         self.monitor.write("\138")
                     end
@@ -777,7 +777,7 @@ function DisplayManager:drawTaskIndicators()
                 for j = 1, math.min(#self.depositThreads[i].log, maxBarHeight) do
                     local barY = threadY - j
                     if barY > separatorY then
-                        self.monitor.setCursorPos(depositX + threadNum, barY)
+                        self.monitor.setCursorPos(depositX + threadNum, barY+1)
                         self.monitor.setTextColor(threadColor)
                         self.monitor.write("\138")
                     end
