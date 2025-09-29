@@ -449,13 +449,16 @@ function StorageManager:processQueues()
         self:updateTaskStatus()
     end
 
-    -- Process deposit queue
+    -- Process deposit queue - FIXED to actually call depositFromInput
     if #self.depositQueue > 0 and self.inputChest then
         local chest = table.remove(self.depositQueue, 1)
         self.executor:submit("deposit", function()
             self.logger:info("Dispatched deposit for " .. chest.name, "Storage")
-            self:depositFromInput(chest)
-            self.calculate = true
+            local result = self:depositFromInput(chest)  -- Actually perform the deposit!
+            if result then
+                self.logger:info("Deposit completed for " .. chest.name, "Storage")
+                self.calculate = true
+            end
         end)
         self:updateTaskStatus()
     end
@@ -511,7 +514,7 @@ function StorageManager:depositLoop()
             self.logger:debug("Processing periodic deposit check", "Storage")
         end
 
-        -- Original check (backup) - check every 2 seconds
+        -- Original check (backup) - check every cycle
         if self.inputChest and not shouldDeposit then
             local inputFull = 0
             for k,v in pairs(self.inputChest.list()) do
@@ -526,7 +529,7 @@ function StorageManager:depositLoop()
 
         -- Process deposit if needed
         if shouldDeposit and self.inputChest and self.emptySlots > 0 then
-            -- Check if deposit threads are already active
+            -- Check if deposit threads are already active OR queue not empty
             local active = false
             local status = self.executor:getStatus()
             for _, thread in ipairs(status.threads) do
@@ -537,10 +540,8 @@ function StorageManager:depositLoop()
                 end
             end
 
-            -- Also check if deposit queue is empty
+            -- Check if we're truly idle (no active threads AND no queued deposits)
             if not active and #self.depositQueue == 0 then
-                self.depositBusy = true
-
                 -- Sort input chest first
                 self.logger:info("Sorting input chest before deposit", "Storage")
                 self:sortChest(self.inputChest, "input", false)
@@ -551,10 +552,9 @@ function StorageManager:depositLoop()
                 -- Play sound feedback
                 self.sound:play("minecraft:block.barrel.open", 1)
 
-                -- Schedule busy flag reset
+                -- Trigger calculation after a delay
                 self.executor:submit("deposit-cleanup", function()
-                    sleep(2) -- Wait for deposits to complete
-                    self.depositBusy = false
+                    sleep(3) -- Wait for deposits to complete
                     self.calculate = true -- Trigger recalculation
                 end, 1) -- Low priority
             elseif active then

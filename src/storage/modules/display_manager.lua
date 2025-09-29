@@ -640,10 +640,8 @@ function DisplayManager:drawTaskIndicators()
     -- Redraw separator line
     self.monitor.setTextColor(colors.gray)
     for x = 1, w do
-        self.monitor.setCursorPos(x, separatorY)
-        if x % 2 == 0 then
-            self.monitor.write("-")
-        end
+        self.monitor.setCursorPos(x, separatorY+1)
+        self.monitor.write("_")
     end
 
     -- Redraw bottom buttons
@@ -810,7 +808,7 @@ function DisplayManager:drawTaskIndicators()
         for i = 1, math.min(#self.orderLog, maxBarHeight) do
             local barY = threadY - i
             if barY > separatorY then
-                self.monitor.setCursorPos(w, barY)
+                self.monitor.setCursorPos(w, barY+1)
                 self.monitor.setTextColor(colors.blue)
                 self.monitor.write("\138")
             end
