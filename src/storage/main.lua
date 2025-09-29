@@ -114,7 +114,7 @@ local function main()
     init()
     while running do
         processManager:tick()  -- resume ready processes
-        sleep(0)               -- yield immediately; keeps UI responsive
+        os.pullEvent()               -- yield immediately; keeps UI responsive
     end
 end
 

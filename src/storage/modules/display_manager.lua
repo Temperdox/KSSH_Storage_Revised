@@ -454,16 +454,39 @@ function DisplayManager:draw()
 
     local w, h = self.monitor.getSize()
 
-    if h > math.floor((#self.displayItems - self.column + 1) / self.column) + 15 then
+    -- Calculate required height more accurately
+    local itemRows = math.max(1, math.ceil(#self.displayItems / self.column))
+    local requiredHeight = itemRows + 8  -- Header + items + status + buttons + margins
+
+    if h >= requiredHeight then
         self:drawHeader()
         self:drawItems()
         self:drawStatus()
         self:drawButtons()
     else
-        self.monitor.setTextColor(colors.red)
-        self.monitor.setTextScale(0.75)
-        self.monitor.setCursorPos(1, 1)
-        self.monitor.write("NOT ENOUGH SPACE")
+        -- Try smaller text scale
+        self.monitor.setTextScale(0.25)
+        w, h = self.monitor.getSize()
+
+        itemRows = math.max(1, math.ceil(#self.displayItems / math.ceil(w / 12)))
+        requiredHeight = itemRows + 6
+
+        if h >= requiredHeight then
+            self:drawHeader()
+            self:drawItems()
+            self:drawStatus()
+            self:drawButtons()
+        else
+            -- Show error message
+            self.monitor.setTextColor(colors.red)
+            self.monitor.setTextScale(0.5)
+            self.monitor.setCursorPos(1, 1)
+            self.monitor.write("MONITOR TOO SMALL")
+            self.monitor.setCursorPos(1, 2)
+            self.monitor.write("Need: " .. requiredHeight)
+            self.monitor.setCursorPos(1, 3)
+            self.monitor.write("Have: " .. h)
+        end
     end
 end
 
