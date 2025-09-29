@@ -501,9 +501,8 @@ function DisplayManager:drawSeparator()
         self.monitor.setTextColor(colors.gray)
         for x = 1, w do
             self.monitor.setCursorPos(x, h - 12)
-            if x % 2 == 0 then
-                self.monitor.write("-")
-            end
+            self.monitor.setCursorPos(x, separatorY-1)
+            self.monitor.write("_")
         end
     end
 end
@@ -640,7 +639,7 @@ function DisplayManager:drawTaskIndicators()
     -- Redraw separator line
     self.monitor.setTextColor(colors.gray)
     for x = 1, w do
-        self.monitor.setCursorPos(x, separatorY+1)
+        self.monitor.setCursorPos(x, separatorY-1)
         self.monitor.write("_")
     end
 
