@@ -118,10 +118,17 @@ function StatsPage:drawOverview()
     term.write("KEY METRICS:")
     y = y + 1
 
-    -- Calculate metrics
+    -- FIXED: Calculate total events properly
     local totalEvents = 0
-    for _, count in pairs(self.stats.eventRates) do
-        totalEvents = totalEvents + count
+    if type(self.stats.eventRates) == "table" then
+        for _, eventData in pairs(self.stats.eventRates) do
+            -- Check if eventData is a number or a table with count field
+            if type(eventData) == "number" then
+                totalEvents = totalEvents + eventData
+            elseif type(eventData) == "table" and eventData.count then
+                totalEvents = totalEvents + eventData.count
+            end
+        end
     end
 
     local metrics = {
@@ -205,10 +212,20 @@ function StatsPage:drawEventStats()
     term.write("EVENT STATISTICS:")
     y = y + 2
 
-    -- Get top events
+    -- Get top events (FIXED: Handle both formats)
     local events = {}
-    for eventType, count in pairs(self.stats.eventRates) do
-        table.insert(events, {type = eventType, count = count})
+
+    if type(self.stats.eventRates) == "table" then
+        for eventType, eventData in pairs(self.stats.eventRates) do
+            local count = 0
+            if type(eventData) == "number" then
+                count = eventData
+            elseif type(eventData) == "table" and eventData.count then
+                count = eventData.count
+            end
+
+            table.insert(events, {type = eventType, count = count})
+        end
     end
 
     table.sort(events, function(a, b) return a.count > b.count end)
@@ -318,6 +335,19 @@ function StatsPage:drawStorageStats()
     end
 end
 
+function StatsPage:drawNetworkStats()
+    local y = 5
+
+    term.setCursorPos(1, y)
+    term.setTextColor(colors.white)
+    term.write("NETWORK STATISTICS:")
+    y = y + 2
+
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.lightGray)
+    term.write("No network data available")
+end
+
 function StatsPage:drawPoolStats()
     local y = 5
 
@@ -383,8 +413,22 @@ function StatsPage:loadStats()
     -- Load event stats from events bridge
     if self.context.services and self.context.services.events then
         local eventStats = self.context.services.events:getStats()
-        self.stats.eventRates = eventStats.topTypes or {}
+        -- The stats might come in different formats, handle both
+        if eventStats then
+            if eventStats.topTypes then
+                self.stats.eventRates = {}
+                for _, typeData in ipairs(eventStats.topTypes) do
+                    self.stats.eventRates[typeData.type] = typeData.count
+                end
+            elseif eventStats.byType then
+                self.stats.eventRates = eventStats.byType
+            end
+        end
     end
+end
+
+function StatsPage:updateStats(event, data)
+    -- Update stats based on event
 end
 
 function StatsPage:loadUptimeData()
@@ -476,7 +520,7 @@ function StatsPage:handleInput(event, key)
     if event == "key" then
         if key == keys.b then
             -- Go back to console
-            self.context.viewFactory:switchTo("console")
+            self.context.router:navigate("console")
         elseif key >= keys.one and key <= keys.five then
             -- Switch tabs with number keys
             local tabIndex = key - keys.one + 1
