@@ -9,9 +9,13 @@ function Endpoints:new(context)
     o.endpoints = {}
 
     -- Register endpoints
-    self:registerEndpoints()
+    o:registerEndpoints()
 
     return o
+end
+
+function Endpoints:getEndpoint(name)
+    return self.endpoints[name]
 end
 
 function Endpoints:registerEndpoints()
@@ -282,16 +286,6 @@ end
 
 function Endpoints:register(name, config)
     self.endpoints[name] = config
-end
-
--- Fixed: Use the metatable __index correctly
-function Endpoints:__index(key)
-    -- First check if it's an endpoint
-    if rawget(self, "endpoints") and self.endpoints[key] then
-        return self.endpoints[key]
-    end
-    -- Otherwise return the class method
-    return rawget(Endpoints, key)
 end
 
 return Endpoints

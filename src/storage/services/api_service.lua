@@ -35,7 +35,8 @@ function ApiService:new(context)
     }
 
     -- Load endpoints
-    o.endpoints = require("protocol.endpoints"):new(context)
+    local Endpoints = require("protocol.endpoints")
+    o.endpoints = Endpoints:new(context)
 
     return o
 end
@@ -120,8 +121,8 @@ function ApiService:processRequest(senderId, message)
         params = message.params
     })
 
-    -- Find endpoint
-    local endpoint = self.endpoints[message.method]
+    -- Find endpoint using getEndpoint method
+    local endpoint = self.endpoints:getEndpoint(message.method)
     if not endpoint then
         self:sendError(senderId, requestId, "METHOD_NOT_FOUND",
                 "Unknown method: " .. message.method)
