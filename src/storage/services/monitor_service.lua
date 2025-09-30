@@ -185,12 +185,16 @@ function MonitorService:render()
     -- Letter navigation (line 3)
     self:drawLetterNav()
 
-    -- Items or pagination (starting line 4)
+    -- Items (starting line 4)
     if self.currentLetter then
-        self:drawPagination()
         self:drawFilteredItems()
     else
         self:drawAllItems()
+    end
+
+    -- Pagination just above visualizer separator (if filtered)
+    if self.currentLetter then
+        self:drawPagination()
     end
 
     -- Visualizer at bottom
@@ -257,13 +261,15 @@ end
 function MonitorService:drawPagination()
     if not self.currentLetter then return end
 
-    self.monitor.setCursorPos(1, 4)
-    self.monitor.setTextColor(colors.white)
-
     local items = self:getFilteredItems()
     local totalPages = math.ceil(#items / self.itemsPerPage)
 
     if totalPages <= 1 then return end
+
+    -- Position pagination just above the dashed separator (height - 12)
+    local paginationY = self.height - 12
+
+    self.monitor.setTextColor(colors.white)
 
     local paginationStr = ""
 
@@ -321,8 +327,9 @@ function MonitorService:drawPagination()
         paginationStr = paginationStr .. " > >>"
     end
 
+    -- Center the pagination
     local x = math.floor((self.width - #paginationStr) / 2)
-    self.monitor.setCursorPos(x, 4)
+    self.monitor.setCursorPos(x, paginationY)
     self.monitor.write(paginationStr)
 end
 
@@ -342,7 +349,7 @@ end
 
 function MonitorService:drawFilteredItems()
     local items = self:getFilteredItems()
-    local startY = 5  -- Account for pagination line
+    local startY = 4  -- Start right after letter nav, pagination is at bottom
 
     if #items == 0 then
         self.monitor.setCursorPos(self.width / 2 - 2, startY)
@@ -429,8 +436,8 @@ function MonitorService:drawVisualizer()
             local stackX = x + (w - 1) * 2
 
             -- Draw stack from bottom up
-            for h = 1, math.min(#worker.stack, self.visualizer.maxHeight) do
-                local stackY = startY + self.visualizer.maxHeight - h
+            for h = 1, math.min(#worker.stack, self.visualizer.maxHeight - 2) do
+                local stackY = startY + self.visualizer.maxHeight - 2 - h
                 local stackItem = worker.stack[h]
 
                 if stackItem then
@@ -440,16 +447,16 @@ function MonitorService:drawVisualizer()
                 end
             end
 
-            -- Draw worker number
-            self.monitor.setCursorPos(stackX, startY + self.visualizer.maxHeight)
+            -- Draw worker number (moved up by 2 lines)
+            self.monitor.setCursorPos(stackX, startY + self.visualizer.maxHeight - 2)
             self.monitor.setTextColor(pool.color)
             self.monitor.write(tostring(w))
         end
 
-        -- Draw pool label
+        -- Draw pool label (moved up by 2 lines, now right below worker numbers)
         local label = self.visualizer.labels[poolName] or poolName
         local labelX = x + math.floor((#pool.workers * 2 - #label) / 2)
-        self.monitor.setCursorPos(labelX, startY + self.visualizer.maxHeight + 1)
+        self.monitor.setCursorPos(labelX, startY + self.visualizer.maxHeight - 1)
         self.monitor.setTextColor(pool.color)
         self.monitor.write(label)
 
@@ -613,8 +620,8 @@ function MonitorService:handleClick(x, y)
         end
     end
 
-    -- Pagination (simplified - you can expand this)
-    if y == 4 and self.currentLetter then
+    -- Pagination (at height - 12)
+    if y == self.height - 12 and self.currentLetter then
         local items = self:getFilteredItems()
         local totalPages = math.ceil(#items / self.itemsPerPage)
 

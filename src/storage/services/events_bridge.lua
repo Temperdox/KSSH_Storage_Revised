@@ -197,29 +197,8 @@ function EventsBridge:shouldFilter(eventName, data)
 end
 
 function EventsBridge:logEvent(eventName, data)
-    -- Determine log file based on event type
-    local logFile = "events"
-
-    if eventName:match("^storage%.") then
-        logFile = "storage"
-    elseif eventName:match("^net%.") or eventName:match("^api%.") then
-        logFile = "network"
-    elseif eventName:match("^test%.") then
-        logFile = "tests"
-    end
-
-    -- Write to appropriate log file
-    local date = os.date("%Y%m%d")
-    local filename = string.format("/storage/logs/%s-%s.log", logFile, date)
-
-    local file = fs.open(filename, "a")
-    if file then
-        file.writeLine(textutils.serialiseJSON({
-            event = eventName,
-            data = data
-        }))
-        file.close()
-    end
+    -- Events are no longer logged to files to save space
+    -- They are only tracked in memory via recentEvents buffer
 end
 
 function EventsBridge:mirrorEvent(eventName, data)

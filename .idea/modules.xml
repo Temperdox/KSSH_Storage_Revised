@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/KSSH_Storage_Revised.iml" filepath="$PROJECT_DIR$/KSSH_Storage_Revised.iml" />
+      <module fileurl="file://$PROJECT_DIR$/NETStore_Storage.iml" filepath="$PROJECT_DIR$/NETStore_Storage.iml" />
     </modules>
   </component>
 </project>
