@@ -265,7 +265,12 @@ function Endpoints:registerEndpoints()
             local settingsPath = "/storage/cfg/settings.json"
             local file = fs.open(settingsPath, "w")
             if file then
-                file.write(textutils.serialiseJSON(self.context.settings))
+                local ok, serialized = pcall(textutils.serialiseJSON, self.context.settings)
+                if ok then
+                    file.write(serialized)
+                else
+                    self.context.logger:error("Endpoints", "Failed to serialize settings")
+                end
                 file.close()
             end
 

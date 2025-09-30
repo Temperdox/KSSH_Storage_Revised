@@ -306,7 +306,15 @@ function StorageService:assignBufferAndSave()
     }
 
     local file = fs.open("/storage/cfg/io_config.json", "w")
-    file.write(textutils.serialiseJSON(config))
+    local ok, json = pcall(textutils.serialiseJSON, config)
+
+    if not ok then
+        file.close()
+        error(string.format("[StorageService:saveConfig] Failed to serialize config: %s", tostring(json)))
+        return
+    end
+
+    file.write(json)
     file.close()
 
     self.logger:info("Discovery", "Configuration saved!")

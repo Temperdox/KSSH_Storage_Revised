@@ -107,7 +107,13 @@ function StatsService:recordUptime()
     -- Save
     local file = fs.open(self.uptimeFile, "w")
     if file then
-        file.write(textutils.serialiseJSON(data))
+        local ok, json = pcall(textutils.serialiseJSON, data)
+
+        if ok then
+            file.write(json)
+        else
+            file.write(string.format("[ERROR] Failed to serialize uptime data: %s", tostring(json)))
+        end
         file.close()
     end
 end
@@ -136,7 +142,13 @@ end
 function StatsService:saveStats()
     local file = fs.open(self.statsFile, "w")
     if file then
-        file.write(textutils.serialiseJSON(self.stats))
+        local ok, json = pcall(textutils.serialiseJSON, self.stats)
+
+        if ok then
+            file.write(json)
+        else
+            file.write(string.format("[ERROR] Failed to serialize stats: %s", tostring(json)))
+        end
         file.close()
     end
 end

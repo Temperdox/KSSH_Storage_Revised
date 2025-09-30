@@ -221,6 +221,49 @@ function HashOA_RRSC:clear()
     end
 end
 
+function HashOA_RRSC:deepCopySimple(tbl, seen)
+    seen = seen or {}
+
+    -- Prevent infinite loops
+    if seen[tbl] then
+        return nil
+    end
+    seen[tbl] = true
+
+    local copy = {}
+    for k, v in pairs(tbl) do
+        local ktype = type(k)
+        local vtype = type(v)
+
+        -- Only copy simple keys
+        if ktype == "string" or ktype == "number" then
+            if vtype == "string" or vtype == "number" or vtype == "boolean" or vtype == "nil" then
+                copy[k] = v
+            elseif vtype == "table" then
+                copy[k] = self:deepCopySimple(v, seen)
+            end
+            -- Skip functions, userdata, threads
+        end
+    end
+    return copy
+end
+
+function HashOA_RRSC:debugItem(item)
+    if not item then return "nil" end
+
+    local result = "key=" .. tostring(item.key) .. ", value fields: "
+    if type(item.value) == "table" then
+        local fields = {}
+        for k, v in pairs(item.value) do
+            table.insert(fields, k .. "(" .. type(v) .. ")")
+        end
+        result = result .. table.concat(fields, ", ")
+    else
+        result = result .. type(item.value)
+    end
+    return result
+end
+
 function HashOA_RRSC:save(path)
     local items = self:getAllItems()
 
@@ -229,15 +272,49 @@ function HashOA_RRSC:save(path)
         items = textutils.empty_json_array or {}
     end
 
+    -- Create a sanitized copy of items that only includes serializable data
+    local sanitizedItems = {}
+    for _, item in ipairs(items) do
+        -- Only include simple data types, skip functions and metatables
+        local sanitizedValue = {}
+        if type(item.value) == "table" then
+            for k, v in pairs(item.value) do
+                local vtype = type(v)
+                if vtype == "string" or vtype == "number" or vtype == "boolean" or vtype == "nil" then
+                    sanitizedValue[k] = v
+                elseif vtype == "table" then
+                    -- Deep copy simple tables (like locations array)
+                    sanitizedValue[k] = self:deepCopySimple(v)
+                end
+                -- Skip functions, userdata, threads
+            end
+        else
+            sanitizedValue = item.value
+        end
+
+        table.insert(sanitizedItems, {
+            key = item.key,
+            value = sanitizedValue
+        })
+    end
+
     local data = {
         size = self.size,
         capacity = self.capacity,
-        items = items
+        items = sanitizedItems
     }
 
     local file = fs.open(path, "w")
     if file then
-        local json = textutils.serialiseJSON(data)
+        local ok, json = pcall(textutils.serialiseJSON, data)
+
+        if not ok then
+            file.close()
+            error(string.format("[HashOA_RRSC:save] Failed to serialize hash table for '%s': %s\nFirst item sample: %s",
+                path, tostring(json), self:debugItem(items[1])))
+            return
+        end
+
         -- Fix empty array serialization
         json = json:gsub('"items":%s*{}', '"items":[]')
         file.write(json)

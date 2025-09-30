@@ -56,7 +56,13 @@ function StatsCommand.register(factory, context)
                 end
             end
 
-            return textutils.serialiseJSON(stats, {compact = true})
+            local ok, json = pcall(textutils.serialiseJSON, stats, {compact = true})
+
+            if ok then
+                return json
+            else
+                return string.format("[ERROR] Failed to serialize stats: %s", tostring(json))
+            end
         end
     })
 end

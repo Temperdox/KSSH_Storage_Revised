@@ -589,12 +589,18 @@ function TestsPage:saveTestResults()
 
     if file then
         for testId, result in pairs(self.testResults) do
-            file.writeLine(textutils.serialiseJSON({
+            local ok, json = pcall(textutils.serialiseJSON, {
                 test = testId,
                 success = result.success,
                 results = result.results,
                 timestamp = result.timestamp
-            }))
+            })
+
+            if ok then
+                file.writeLine(json)
+            else
+                file.writeLine(string.format("[ERROR] Failed to serialize test result for %s: %s", testId, tostring(json)))
+            end
         end
         file.close()
     end

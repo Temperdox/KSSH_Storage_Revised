@@ -43,7 +43,11 @@ function RPC:encodeError(code, message, id)
 end
 
 function RPC:encode(message)
-    local json = textutils.serialiseJSON(message)
+    local ok, json = pcall(textutils.serialiseJSON, message)
+
+    if not ok then
+        error(string.format("[RPC:encode] Failed to serialize RPC message: %s", tostring(json)))
+    end
 
     -- Check size
     if #json > self.maxMessageSize then

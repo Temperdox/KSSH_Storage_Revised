@@ -146,7 +146,12 @@ local function startup()
             }
         }
         -- Save default settings to disk
-        diskManager:writeFile("config", settingsFilename, textutils.serialiseJSON(settings))
+        local ok, serialized = pcall(textutils.serialiseJSON, settings)
+        if ok then
+            diskManager:writeFile("config", settingsFilename, serialized)
+        else
+            originalPrint("[ERROR] Failed to serialize default settings: " .. tostring(serialized))
+        end
     end
 
     -- Create logger that uses the print buffer and disk manager

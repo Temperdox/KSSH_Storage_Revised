@@ -61,8 +61,16 @@ function SettingsService:applyChange(change)
 end
 
 function SettingsService:save()
+    -- Try to serialize settings with error handling
+    local ok, serialized = pcall(textutils.serialiseJSON, self.settings)
+
+    if not ok then
+        self.logger:error("SettingsService", "Failed to serialize settings: " .. tostring(serialized))
+        return
+    end
+
     if self.diskManager then
-        local success, path = self.diskManager:writeFile("config", self.settingsFilename, textutils.serialiseJSON(self.settings))
+        local success, path = self.diskManager:writeFile("config", self.settingsFilename, serialized)
         if success then
             self.logger:debug("SettingsService", "Settings saved to " .. path)
         else
@@ -72,7 +80,7 @@ function SettingsService:save()
         -- Fallback to local filesystem
         local file = fs.open("/storage/cfg/settings.json", "w")
         if file then
-            file.write(textutils.serialiseJSON(self.settings))
+            file.write(serialized)
             file.close()
             self.logger:debug("SettingsService", "Settings saved")
         else

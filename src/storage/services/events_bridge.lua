@@ -339,7 +339,15 @@ function EventsBridge:saveStats()
 
     local file = fs.open(statsFile, "w")
     if file then
-        file.write(textutils.serialiseJSON(data))
+        local ok, json = pcall(textutils.serialiseJSON, data)
+
+        if not ok then
+            file.close()
+            error(string.format("[EventsBridge:saveStats] Failed to serialize event stats: %s", tostring(json)))
+            return
+        end
+
+        file.write(json)
         file.close()
     end
 end

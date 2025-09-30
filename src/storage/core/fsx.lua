@@ -28,12 +28,18 @@ function fsx.readJson(path)
 end
 
 function fsx.writeJson(path, data)
-    local content = textutils.serialiseJSON(data)
+    local ok, content = pcall(textutils.serialiseJSON, data)
+
+    if not ok then
+        error(string.format("[fsx.writeJson] Failed to serialize data for '%s': %s", path, tostring(content)))
+        return false
+    end
 
     -- Atomic write
     local tmpPath = path .. ".tmp"
     local file = fs.open(tmpPath, "w")
     if not file then
+        error(string.format("[fsx.writeJson] Failed to open file '%s' for writing", tmpPath))
         return false
     end
 

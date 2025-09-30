@@ -965,14 +965,19 @@ function TestsService:saveTestArtifact(testName, result)
 
     local file = fs.open(filename, "w")
     if file then
-        file.write(textutils.serialiseJSON({
+        local ok, json = pcall(textutils.serialiseJSON, {
             test = testName,
             timestamp = os.epoch("utc"),
             result = result
-        }))
-        file.close()
+        })
 
-        self.testArtifacts[testName] = filename
+        if ok then
+            file.write(json)
+            self.testArtifacts[testName] = filename
+        else
+            file.write(string.format("[ERROR] Failed to serialize test result for %s: %s", testName, tostring(json)))
+        end
+        file.close()
     end
 end
 
@@ -1003,7 +1008,13 @@ function TestsService:saveTestResults()
 
     local file = fs.open(resultsFile, "w")
     if file then
-        file.write(textutils.serialiseJSON(data))
+        local ok, json = pcall(textutils.serialiseJSON, data)
+
+        if ok then
+            file.write(json)
+        else
+            file.write(string.format("[ERROR] Failed to serialize test results: %s", tostring(json)))
+        end
         file.close()
     end
 end

@@ -39,7 +39,12 @@ function LogLevelCommand.register(factory, context)
             local settingsPath = "/storage/cfg/settings.json"
             local file = fs.open(settingsPath, "w")
             if file then
-                file.write(textutils.serialiseJSON(context.settings))
+                local ok, serialized = pcall(textutils.serialiseJSON, context.settings)
+                if ok then
+                    file.write(serialized)
+                else
+                    context.logger:error("LogLevel", "Failed to serialize settings")
+                end
                 file.close()
             end
 

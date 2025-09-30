@@ -253,12 +253,19 @@ function SettingsPage:saveSettings()
     local file = fs.open(settingsPath, "w")
 
     if file then
-        file.write(textutils.serialiseJSON(self.settings))
-        file.close()
+        -- Try to serialize, but catch any errors
+        local ok, serialized = pcall(textutils.serialiseJSON, self.settings)
 
-        self.logger:info("Settings", "Settings saved successfully")
+        if ok then
+            file.write(serialized)
+            file.close()
+            self.logger:info("Settings", "Settings saved successfully")
+        else
+            file.close()
+            self.logger:error("Settings", "Failed to serialize settings: " .. tostring(serialized))
+        end
     else
-        self.logger:error("Settings", "Failed to save settings")
+        self.logger:error("Settings", "Failed to open settings file")
     end
 end
 
