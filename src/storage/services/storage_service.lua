@@ -9,62 +9,301 @@ function StorageService:new(context)
     o.eventBus = context.eventBus
     o.scheduler = context.scheduler
     o.logger = context.logger
-    o.storageMap = context.storageMap
-    o.bufferInventory = context.bufferInventory
-    o.inputSide = context.settings.inputSide or "right"
-    o.outputSide = context.settings.outputSide or "left"
+    o.storageMap = context.storageMap  -- All discovered storages
+    o.bufferInventory = nil  -- DON'T ASSIGN YET!
+
+    -- Auto-discovery state
+    o.discoveryMode = false
+    o.inputConfig = nil   -- {side: "left/right", networkId: "peripheral_name"}
+    o.outputConfig = nil  -- {side: "left/right", networkId: "peripheral_name"}
 
     -- Initialize item index
     o.itemIndex = HashOA_RRSC:new(context.eventBus)
     o.itemIndex:load("/storage/data/item_index.dat")
 
-    -- Get the wired modem for network operations
+    -- Get wired modem
     o.modem = peripheral.find("modem", function(name, p)
         return name == "back" and not p.isWireless()
     end)
 
     if not o.modem then
         o.logger:error("StorageService", "No wired modem found on back!")
+        error("No wired modem on back")
     end
 
-    -- Peripheral handles
-    -- Buffer is on the wired network
-    o.buffer = peripheral.wrap(o.bufferInventory.name)
-    if not o.buffer then
-        o.logger:error("StorageService", "Failed to wrap buffer: " .. o.bufferInventory.name)
-    else
-        o.logger:info("StorageService", "Buffer found: " .. o.bufferInventory.name)
-    end
+    -- Check for existing configuration
+    local configPath = "/storage/cfg/io_config.json"
+    if fs.exists(configPath) then
+        local file = fs.open(configPath, "r")
+        local config = textutils.unserialiseJSON(file.readAll())
+        file.close()
 
-    -- Input/Output chests are directly connected to the computer sides
-    if peripheral.isPresent(o.inputSide) then
-        o.inputChest = peripheral.wrap(o.inputSide)
-        o.logger:info("StorageService", "Input chest found on " .. o.inputSide)
+        o.inputConfig = config.input
+        o.outputConfig = config.output
+        o.bufferInventory = config.buffer
+        o.logger:info("StorageService", "Loaded I/O configuration")
+        o.logger:info("StorageService", "Input: " .. o.inputConfig.networkId .. " (side: " .. o.inputConfig.side .. ")")
+        o.logger:info("StorageService", "Output: " .. o.outputConfig.networkId .. " (side: " .. o.outputConfig.side .. ")")
     else
-        o.logger:warn("StorageService", "No input chest found on side: " .. o.inputSide)
-        o.inputChest = nil
-    end
-
-    if peripheral.isPresent(o.outputSide) then
-        o.outputChest = peripheral.wrap(o.outputSide)
-        o.logger:info("StorageService", "Output chest found on " .. o.outputSide)
-    else
-        o.logger:warn("StorageService", "No output chest found on side: " .. o.outputSide)
-        o.outputChest = nil
+        o.logger:info("StorageService", "No configuration found, starting discovery...")
+        o.discoveryMode = true
     end
 
     o.running = false
-
     return o
 end
 
 function StorageService:start()
     self.running = true
 
-    -- Initial index rebuild
+    if self.discoveryMode then
+        self.logger:info("StorageService", "Starting auto-discovery...")
+        self.scheduler:submit("io", function()
+            self:runDiscovery()
+        end)
+    else
+        -- Normal operation
+        self:initializePeripherals()
+        self:rebuildIndex()
+
+        self.scheduler:submit("io", function()
+            self:monitorInput()
+        end)
+
+        self.scheduler:submit("io", function()
+            self:processBuffer()
+        end)
+    end
+
+    -- Subscribe to events
+    self.eventBus:subscribe("storage.withdraw", function(event, data)
+        if not self.discoveryMode then
+            self:withdraw(data.itemName, data.count)
+        end
+    end)
+
+    self.logger:info("StorageService", "Service started")
+end
+
+function StorageService:runDiscovery()
+    self.logger:info("Discovery", "=== AUTO-DISCOVERY MODE ===")
+    self.logger:info("Discovery", "Please insert items into any chest...")
+
+    -- Step 1: Wait for items to appear anywhere
+    local lastState = self:captureAllInventoryState()
+    local inputFound = false
+
+    while not inputFound and self.running do
+        os.sleep(0.5)
+        local currentState = self:captureAllInventoryState()
+
+        -- Find what changed
+        for networkId, currentItems in pairs(currentState) do
+            local lastItems = lastState[networkId] or {}
+
+            -- Check if items were added
+            if self:hasNewItems(lastItems, currentItems) then
+                self.logger:info("Discovery", "Items detected in: " .. networkId)
+
+                -- Step 2: Check if computer can see these items on left or right
+                local detectedSide = nil
+
+                -- Check left side
+                if peripheral.isPresent("left") then
+                    local leftInv = peripheral.wrap("left")
+                    if leftInv and leftInv.list then
+                        local leftItems = leftInv.list()
+                        if self:inventoriesMatch(leftItems, currentItems) then
+                            detectedSide = "left"
+                        end
+                    end
+                end
+
+                -- Check right side
+                if not detectedSide and peripheral.isPresent("right") then
+                    local rightInv = peripheral.wrap("right")
+                    if rightInv and rightInv.list then
+                        local rightItems = rightInv.list()
+                        if self:inventoriesMatch(rightItems, currentItems) then
+                            detectedSide = "right"
+                        end
+                    end
+                end
+
+                if detectedSide then
+                    self.logger:info("Discovery", "INPUT FOUND!")
+                    self.logger:info("Discovery", "Network ID: " .. networkId)
+                    self.logger:info("Discovery", "Computer Side: " .. detectedSide)
+
+                    self.inputConfig = {
+                        side = detectedSide,
+                        networkId = networkId
+                    }
+
+                    inputFound = true
+
+                    -- Now discover output
+                    self:discoverOutput(networkId, currentItems)
+                    break
+                end
+            end
+        end
+
+        lastState = currentState
+    end
+end
+
+function StorageService:discoverOutput(inputNetworkId, inputItems)
+    self.logger:info("Discovery", "Searching for output chest...")
+
+    -- Get the first item to test with
+    local testSlot, testItem = next(inputItems)
+    if not testSlot or not testItem then
+        self.logger:error("Discovery", "No items to test with!")
+        return
+    end
+
+    self.logger:info("Discovery", "Testing with: " .. testItem.name)
+
+    -- Get input inventory using network ID
+    local inputInv = peripheral.wrap(inputNetworkId)
+    if not inputInv then
+        self.logger:error("Discovery", "Failed to wrap input inventory!")
+        return
+    end
+
+    -- Get opposite side for output
+    local expectedOutputSide = (self.inputConfig.side == "left") and "right" or "left"
+
+    -- Get all network inventories except input
+    local testInventories = {}
+    for _, name in ipairs(self.modem.getNamesRemote()) do
+        if name ~= inputNetworkId then
+            local pType = peripheral.getType(name)
+            if pType and (pType:find("chest") or pType:find("barrel") or pType:find("shulker")) then
+                table.insert(testInventories, name)
+            end
+        end
+    end
+
+    self.logger:info("Discovery", "Found " .. #testInventories .. " inventories to test")
+
+    -- Test each inventory
+    for _, targetNetworkId in ipairs(testInventories) do
+        self.logger:info("Discovery", "Testing: " .. targetNetworkId)
+
+        -- Move ONE item using network IDs
+        local moved = inputInv.pushItems(targetNetworkId, testSlot, 1)
+
+        if moved and moved > 0 then
+            -- Check if the opposite side now has the item
+            os.sleep(0.2)  -- Small delay to ensure transfer completes
+
+            if peripheral.isPresent(expectedOutputSide) then
+                local sideInv = peripheral.wrap(expectedOutputSide)
+                if sideInv and sideInv.list then
+                    local sideItems = sideInv.list()
+
+                    -- Check if the item appeared on this side
+                    for slot, item in pairs(sideItems) do
+                        if item.name == testItem.name then
+                            self.logger:info("Discovery", "OUTPUT FOUND!")
+                            self.logger:info("Discovery", "Network ID: " .. targetNetworkId)
+                            self.logger:info("Discovery", "Computer Side: " .. expectedOutputSide)
+
+                            self.outputConfig = {
+                                side = expectedOutputSide,
+                                networkId = targetNetworkId
+                            }
+
+                            -- Move item back to input
+                            local targetInv = peripheral.wrap(targetNetworkId)
+                            targetInv.pushItems(inputNetworkId, slot, 1)
+
+                            -- Now assign buffer and save config
+                            self:assignBufferAndSave()
+                            return
+                        end
+                    end
+                end
+            end
+
+            -- Not the output, move item back
+            local targetInv = peripheral.wrap(targetNetworkId)
+            if targetInv then
+                -- Find where the item went
+                local targetItems = targetInv.list()
+                for slot, item in pairs(targetItems) do
+                    if item.name == testItem.name then
+                        targetInv.pushItems(inputNetworkId, slot, 1)
+                        break
+                    end
+                end
+            end
+        end
+
+        os.sleep(0.1)  -- Small delay between tests
+    end
+
+    self.logger:error("Discovery", "Could not find output chest!")
+end
+
+function StorageService:assignBufferAndSave()
+    self.logger:info("Discovery", "Assigning buffer from remaining storages...")
+
+    -- Find the largest remaining storage for buffer
+    local largestSize = 0
+    local largestId = nil
+
+    for _, name in ipairs(self.modem.getNamesRemote()) do
+        -- Skip input and output
+        if name ~= self.inputConfig.networkId and name ~= self.outputConfig.networkId then
+            local pType = peripheral.getType(name)
+            if pType and (pType:find("chest") or pType:find("barrel") or pType:find("shulker")) then
+                local inv = peripheral.wrap(name)
+                if inv and inv.size then
+                    local size = inv.size()
+                    if size > largestSize then
+                        largestSize = size
+                        largestId = name
+                    end
+                end
+            end
+        end
+    end
+
+    if largestId then
+        self.bufferInventory = {
+            name = largestId,
+            size = largestSize
+        }
+        self.logger:info("Discovery", "Buffer assigned: " .. largestId .. " (" .. largestSize .. " slots)")
+    else
+        self.logger:error("Discovery", "No suitable buffer found!")
+        return
+    end
+
+    -- Save configuration
+    local config = {
+        input = self.inputConfig,
+        output = self.outputConfig,
+        buffer = self.bufferInventory,
+        timestamp = os.epoch("utc")
+    }
+
+    local file = fs.open("/storage/cfg/io_config.json", "w")
+    file.write(textutils.serialiseJSON(config))
+    file.close()
+
+    self.logger:info("Discovery", "Configuration saved!")
+    self.logger:info("Discovery", "Discovery complete! Starting normal operation...")
+
+    -- Exit discovery mode and start normal operation
+    self.discoveryMode = false
+    self:initializePeripherals()
     self:rebuildIndex()
 
-    -- Start monitoring tasks
+    -- Start monitoring
     self.scheduler:submit("io", function()
         self:monitorInput()
     end)
@@ -72,30 +311,75 @@ function StorageService:start()
     self.scheduler:submit("io", function()
         self:processBuffer()
     end)
-
-    -- Subscribe to events
-    self.eventBus:subscribe("storage.withdraw", function(event, data)
-        self:withdraw(data.itemName, data.count)
-    end)
-
-    self.eventBus:subscribe("storage.deposit", function(event, data)
-        self:deposit(data.items)
-    end)
-
-    self.eventBus:subscribe("storage.rescan", function()
-        self:rebuildIndex()
-    end)
-
-    self.logger:info("StorageService", "Service started")
 end
 
-function StorageService:stop()
-    self.running = false
+function StorageService:captureAllInventoryState()
+    local state = {}
 
-    -- Save index
-    self.itemIndex:save("/storage/data/item_index.dat")
+    -- Capture all network inventories
+    for _, name in ipairs(self.modem.getNamesRemote()) do
+        local pType = peripheral.getType(name)
+        if pType and (pType:find("chest") or pType:find("barrel") or pType:find("shulker")) then
+            local inv = peripheral.wrap(name)
+            if inv and inv.list then
+                state[name] = inv.list()
+            end
+        end
+    end
 
-    self.logger:info("StorageService", "Service stopped")
+    return state
+end
+
+function StorageService:hasNewItems(oldItems, newItems)
+    -- Count total items
+    local oldCount = 0
+    for _, item in pairs(oldItems) do
+        oldCount = oldCount + item.count
+    end
+
+    local newCount = 0
+    for _, item in pairs(newItems) do
+        newCount = newCount + item.count
+    end
+
+    return newCount > oldCount
+end
+
+function StorageService:inventoriesMatch(inv1, inv2)
+    -- Check if two inventories have the same items
+    local items1 = {}
+    for _, item in pairs(inv1) do
+        items1[item.name] = (items1[item.name] or 0) + item.count
+    end
+
+    local items2 = {}
+    for _, item in pairs(inv2) do
+        items2[item.name] = (items2[item.name] or 0) + item.count
+    end
+
+    -- Compare
+    for name, count in pairs(items1) do
+        if items2[name] ~= count then
+            return false
+        end
+    end
+
+    for name, count in pairs(items2) do
+        if items1[name] ~= count then
+            return false
+        end
+    end
+
+    return true
+end
+
+function StorageService:initializePeripherals()
+    -- Use network IDs for everything!
+    self.inputChest = peripheral.wrap(self.inputConfig.networkId)
+    self.outputChest = peripheral.wrap(self.outputConfig.networkId)
+    self.buffer = peripheral.wrap(self.bufferInventory.name)
+
+    self.logger:info("StorageService", "Peripherals initialized using network IDs")
 end
 
 function StorageService:monitorInput()
@@ -103,34 +387,9 @@ function StorageService:monitorInput()
         if self.inputChest and self.buffer then
             local ok, items = pcall(function() return self.inputChest.list() end)
             if ok and items and next(items) then
-                -- Since input chest is on a side and buffer is on network,
-                -- we need to use the buffer to pull from the input chest
-                -- OR use the modem as an intermediary
-
                 for slot, item in pairs(items) do
-                    -- Try to have the buffer pull from the input chest
-                    local moved = 0
-
-                    -- First attempt: buffer pulls from input side
-                    if self.buffer.pullItems then
-                        moved = self.buffer.pullItems(self.inputSide, slot)
-                    end
-
-                    -- If that didn't work, try pushing through the modem
-                    if moved == 0 and self.modem then
-                        -- Use the modem to facilitate the transfer
-                        -- The modem can see both the side peripheral and network peripherals
-                        local ok2, result = pcall(function()
-                            -- Try to get the modem to help transfer
-                            return self.inputChest.pushItems(self.bufferInventory.name, slot)
-                        end)
-
-                        if ok2 and result then
-                            moved = result
-                        else
-                            self.logger:debug("StorageService", "Failed to push through modem: " .. tostring(result))
-                        end
-                    end
+                    -- Transfer using network IDs only!
+                    local moved = self.inputChest.pushItems(self.bufferInventory.name, slot)
 
                     if moved and moved > 0 then
                         self.eventBus:publish("storage.inputReceived", {
@@ -146,10 +405,6 @@ function StorageService:monitorInput()
                         ))
                     end
                 end
-
-                self.eventBus:publish("storage.movedToBuffer", {
-                    itemCount = #items
-                })
             end
         end
 
@@ -170,11 +425,8 @@ function StorageService:processBuffer()
                     local targetStorage = self:findBestStorage(item)
 
                     if targetStorage then
-                        -- Both buffer and storage are on the network, so this should work
-                        local moved = self.buffer.pushItems(
-                                targetStorage.name,
-                                slot
-                        )
+                        -- Use network ID for transfer
+                        local moved = self.buffer.pushItems(targetStorage.name, slot)
 
                         if moved and moved > 0 then
                             self.eventBus:publish("storage.movedToStorage", {
@@ -182,11 +434,6 @@ function StorageService:processBuffer()
                                 count = moved,
                                 storage = targetStorage.name
                             })
-
-                            self.logger:debug("StorageService", string.format(
-                                    "Stored %d x %s in %s",
-                                    moved, item.name, targetStorage.name
-                            ))
                         end
                     end
                 end
@@ -197,26 +444,51 @@ function StorageService:processBuffer()
     end
 end
 
-function StorageService:findBestStorage(item)
-    -- Simple strategy: find first available storage with space
+function StorageService:withdraw(itemName, requestedCount)
+    local itemData = self.itemIndex:get(itemName)
+
+    if not itemData or itemData.count == 0 then
+        self.eventBus:publish("storage.withdrawFailed", {
+            item = itemName,
+            reason = "Item not found"
+        })
+        return 0
+    end
+
+    if not self.outputChest then
+        self.eventBus:publish("storage.withdrawFailed", {
+            item = itemName,
+            reason = "No output chest"
+        })
+        return 0
+    end
+
+    local withdrawn = 0
+    local remaining = math.min(requestedCount, itemData.count)
+
     for _, storage in ipairs(self.storageMap) do
+        if remaining <= 0 then break end
+
         local inv = peripheral.wrap(storage.name)
         if inv then
             local ok, slots = pcall(function() return inv.list() end)
             if ok and slots then
-                -- Check for existing stack
                 for slot, slotItem in pairs(slots) do
-                    if slotItem.name == item.name and slotItem.count < (slotItem.maxCount or 64) then
-                        return storage
-                    end
-                end
+                    if slotItem.name == itemName and remaining > 0 then
+                        local toMove = math.min(remaining, slotItem.count)
 
-                -- Check for empty slot
-                if inv.size then
-                    local invSize = inv.size()
-                    for i = 1, invSize do
-                        if not slots[i] then
-                            return storage
+                        -- Use network ID for output!
+                        local moved = inv.pushItems(self.outputConfig.networkId, slot, toMove)
+
+                        if moved and moved > 0 then
+                            withdrawn = withdrawn + moved
+                            remaining = remaining - moved
+
+                            self.eventBus:publish("storage.itemWithdrawn", {
+                                item = itemName,
+                                count = moved,
+                                from = storage.name
+                            })
                         end
                     end
                 end
@@ -224,6 +496,51 @@ function StorageService:findBestStorage(item)
         end
     end
 
+    if withdrawn > 0 then
+        self:updateIndex(itemName, withdrawn, "remove")
+    end
+
+    self.eventBus:publish("storage.withdrawComplete", {
+        item = itemName,
+        requested = requestedCount,
+        withdrawn = withdrawn
+    })
+
+    return withdrawn
+end
+
+-- Standard methods
+function StorageService:findBestStorage(item)
+    for _, storage in ipairs(self.storageMap) do
+        -- Skip input, output, and buffer
+        if storage.name ~= self.inputConfig.networkId and
+                storage.name ~= self.outputConfig.networkId and
+                storage.name ~= self.bufferInventory.name then
+
+            local inv = peripheral.wrap(storage.name)
+            if inv then
+                local ok, slots = pcall(function() return inv.list() end)
+                if ok and slots then
+                    -- Check for existing stack
+                    for slot, slotItem in pairs(slots) do
+                        if slotItem.name == item.name and slotItem.count < (slotItem.maxCount or 64) then
+                            return storage
+                        end
+                    end
+
+                    -- Check for empty slot
+                    if inv.size then
+                        local invSize = inv.size()
+                        for i = 1, invSize do
+                            if not slots[i] then
+                                return storage
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
     return nil
 end
 
@@ -250,135 +567,45 @@ function StorageService:updateIndex(itemName, count, operation)
     })
 end
 
-function StorageService:withdraw(itemName, requestedCount)
-    local itemData = self.itemIndex:get(itemName)
-
-    if not itemData or itemData.count == 0 then
-        self.eventBus:publish("storage.withdrawFailed", {
-            item = itemName,
-            reason = "Item not found"
-        })
-        return 0
-    end
-
-    if not self.outputChest then
-        self.eventBus:publish("storage.withdrawFailed", {
-            item = itemName,
-            reason = "No output chest available"
-        })
-        return 0
-    end
-
-    local withdrawn = 0
-    local remaining = math.min(requestedCount, itemData.count)
-
-    -- Search all storages for the item
-    for _, storage in ipairs(self.storageMap) do
-        if remaining <= 0 then break end
-
-        local inv = peripheral.wrap(storage.name)
-        if inv then
-            local ok, slots = pcall(function() return inv.list() end)
-            if ok and slots then
-                for slot, slotItem in pairs(slots) do
-                    if slotItem.name == itemName and remaining > 0 then
-                        local toMove = math.min(remaining, slotItem.count)
-
-                        -- Storage is on network, output is on side
-                        -- Try having output chest pull from storage
-                        local moved = 0
-
-                        if self.outputChest.pullItems then
-                            moved = self.outputChest.pullItems(storage.name, slot, toMove)
-                        end
-
-                        -- If that didn't work, try pushing
-                        if moved == 0 then
-                            moved = inv.pushItems(self.outputSide, slot, toMove)
-                        end
-
-                        if moved and moved > 0 then
-                            withdrawn = withdrawn + moved
-                            remaining = remaining - moved
-
-                            self.eventBus:publish("storage.itemWithdrawn", {
-                                item = itemName,
-                                count = moved,
-                                from = storage.name
-                            })
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    -- Update index
-    if withdrawn > 0 then
-        self:updateIndex(itemName, withdrawn, "remove")
-    end
-
-    self.eventBus:publish("storage.withdrawComplete", {
-        item = itemName,
-        requested = requestedCount,
-        withdrawn = withdrawn
-    })
-
-    return withdrawn
-end
-
-function StorageService:deposit(items)
-    -- Move items from output chest back to input
-    if self.outputChest and self.inputChest then
-        local ok, outputItems = pcall(function() return self.outputChest.list() end)
-        if ok and outputItems then
-            for slot, item in pairs(outputItems) do
-                -- Both are on sides, so this should work
-                self.outputChest.pushItems(self.inputSide, slot)
-            end
-        end
-    end
-
-    self.eventBus:publish("storage.depositComplete", {
-        items = items
-    })
-end
-
 function StorageService:rebuildIndex()
     self.logger:info("StorageService", "Rebuilding item index...")
 
     self.itemIndex:clear()
     local totalItems = 0
 
-    -- Scan all storages (these are on the network)
     for _, storage in ipairs(self.storageMap) do
-        local inv = peripheral.wrap(storage.name)
-        if inv then
-            local ok, slots = pcall(function() return inv.list() end)
-            if ok and slots then
-                for slot, item in pairs(slots) do
-                    local current = self.itemIndex:get(item.name) or {
-                        count = 0,
-                        stackSize = item.maxCount or 64,
-                        nbtHash = item.nbt,
-                        locations = {}
-                    }
+        -- Skip input, output, buffer
+        if storage.name ~= self.inputConfig.networkId and
+                storage.name ~= self.outputConfig.networkId and
+                storage.name ~= self.bufferInventory.name then
 
-                    current.count = current.count + item.count
-                    table.insert(current.locations, {
-                        id = storage.id,
-                        slot = slot,
-                        count = item.count
-                    })
+            local inv = peripheral.wrap(storage.name)
+            if inv then
+                local ok, slots = pcall(function() return inv.list() end)
+                if ok and slots then
+                    for slot, item in pairs(slots) do
+                        local current = self.itemIndex:get(item.name) or {
+                            count = 0,
+                            stackSize = item.maxCount or 64,
+                            nbtHash = item.nbt,
+                            locations = {}
+                        }
 
-                    self.itemIndex:put(item.name, current)
-                    totalItems = totalItems + 1
+                        current.count = current.count + item.count
+                        table.insert(current.locations, {
+                            id = storage.id,
+                            slot = slot,
+                            count = item.count
+                        })
+
+                        self.itemIndex:put(item.name, current)
+                        totalItems = totalItems + 1
+                    end
                 end
             end
         end
     end
 
-    -- Save index
     self.itemIndex:save("/storage/data/item_index.dat")
 
     self.eventBus:publish("storage.indexRebuilt", {
@@ -406,12 +633,13 @@ function StorageService:searchItems(query)
         end
     end
 
-    self.eventBus:publish("storage.searched", {
-        query = query,
-        results = #results
-    })
-
     return results
+end
+
+function StorageService:stop()
+    self.running = false
+    self.itemIndex:save("/storage/data/item_index.dat")
+    self.logger:info("StorageService", "Service stopped")
 end
 
 return StorageService
