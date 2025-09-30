@@ -1,4 +1,4 @@
--- KSSH Storage System Dynamic Installer with Integrated Pixelbox Rainbow Splash
+-- KSSH Storage System Dynamic Installer
 local GITHUB_REPO   = "Temperdox/KSSH_Storage_Revised"
 local GITHUB_BRANCH = "master"
 local GITHUB_PATH   = "src"
@@ -19,147 +19,6 @@ local COLORS = {
 }
 
 local INSTALL_MODE = { CLEAN = "clean", UPDATE = "update" }
-
--- ========= INTEGRATED PIXELBOX (MIT License) =========
--- MIT License
--- Copyright (c) 2024 9551Dev
---
--- Permission is hereby granted, free of charge, to any person obtaining a copy
--- of this software and associated documentation files (the "Software"), to deal
--- in the Software without restriction, including without limitation the rights
--- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
--- copies of the Software, and to permit persons to whom the Software is
--- furnished to do so, subject to the following conditions:
---
--- The above copyright notice and this permission notice shall be included in all
--- copies or substantial portions of the Software.
---
--- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
--- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
--- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
--- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
--- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
--- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
--- SOFTWARE.
-
--- Minimal pixelbox implementation for splash screen
-local function createPixelBox(terminal)
-    local box = {}
-    local w, h = terminal.getSize()
-    box.width = w * 2
-    box.height = h * 3
-    box.canvas = {}
-
-    -- Initialize canvas
-    for y = 1, box.height do
-        box.canvas[y] = {}
-        for x = 1, box.width do
-            box.canvas[y][x] = colors.black
-        end
-    end
-
-    -- Simple render function for our use case
-    function box:render()
-        local char_line, fg_line, bg_line = {}, {}, {}
-        local to_blit = {}
-        for i = 0, 15 do
-            to_blit[2^i] = ("%x"):format(i)
-        end
-
-        local sy = 0
-        for y = 1, self.height, 3 do
-            sy = sy + 1
-            local n = 0
-            for x = 1, self.width, 2 do
-                -- Get the 2x3 block of pixels
-                local block = {}
-                for dy = 0, 2 do
-                    for dx = 0, 1 do
-                        local py = y + dy
-                        local px = x + dx
-                        if self.canvas[py] and self.canvas[py][px] then
-                            table.insert(block, self.canvas[py][px])
-                        else
-                            table.insert(block, colors.black)
-                        end
-                    end
-                end
-
-                -- Find most common color for background
-                local colorCounts = {}
-                for _, c in ipairs(block) do
-                    colorCounts[c] = (colorCounts[c] or 0) + 1
-                end
-                local maxCount, bgColor = 0, colors.black
-                for c, count in pairs(colorCounts) do
-                    if count > maxCount then
-                        maxCount = count
-                        bgColor = c
-                    end
-                end
-
-                -- Simple character selection based on pattern
-                local char = " "
-                local fgColor = bgColor
-
-                -- If not all same color, use a block character
-                local allSame = true
-                for _, c in ipairs(block) do
-                    if c ~= bgColor then
-                        allSame = false
-                        fgColor = c
-                        break
-                    end
-                end
-
-                if not allSame then
-                    -- Use different block characters based on pattern
-                    local topDiff = (block[1] ~= bgColor or block[2] ~= bgColor)
-                    local midDiff = (block[3] ~= bgColor or block[4] ~= bgColor)
-                    local botDiff = (block[5] ~= bgColor or block[6] ~= bgColor)
-
-                    if topDiff and not midDiff and not botDiff then
-                        char = "\143"  -- Upper half block
-                    elseif not topDiff and not midDiff and botDiff then
-                        char = "\131"  -- Lower half block
-                    elseif topDiff and midDiff and botDiff then
-                        char = "\127"  -- Full block
-                    else
-                        char = "\127"  -- Default to full block
-                    end
-                end
-
-                n = n + 1
-                char_line[n] = char
-                fg_line[n] = to_blit[fgColor] or "0"
-                bg_line[n] = to_blit[bgColor] or "f"
-            end
-
-            terminal.setCursorPos(1, sy)
-            terminal.blit(
-                    table.concat(char_line),
-                    table.concat(fg_line),
-                    table.concat(bg_line)
-            )
-        end
-    end
-
-    function box:setPixel(x, y, color)
-        if self.canvas[y] then
-            self.canvas[y][x] = color
-        end
-    end
-
-    function box:clear(color)
-        for y = 1, self.height do
-            for x = 1, self.width do
-                self.canvas[y][x] = color or colors.black
-            end
-        end
-    end
-
-    return box
-end
 
 -- ========= UI helpers =========
 local function clamp(x,a,b) return math.max(a, math.min(b, x)) end
@@ -288,56 +147,176 @@ local function showProgress(title, message, percent, color)
     term.setCursorPos(math.floor((w - #p)/2), barY+2); term.write(p)
 end
 
--- ========= Splash (auto-continue) with Pixelbox =========
+-- Graphic decoder functions
+local function decodegraphic(jsonData)
+    -- If jsonData is already a table (embedded), use it directly
+    if type(jsonData) == "table" then
+        for k, v in pairs(jsonData) do
+            return {
+                width = v.width,
+                image = v.image,
+            }
+        end
+    end
+    -- Otherwise try to load from file
+    local file = fs.open(jsonData..".json", "r")
+    if not file then return nil end
+    local contents = file.readAll()
+    file.close()
+    for k, v in pairs(textutils.unserialiseJSON(contents)) do
+        return {
+            width = v.width,
+            image = v.image,
+        }
+    end
+end
+
+local function drawgraphic(screen, image, x, y, fg, bg)
+    local img = decodegraphic(image)
+    if not img then return end
+
+    screen.setCursorPos(x, y)
+    for i = 1, #img.image do
+        local ch, fgc, bgc = 0x80, fg, bg
+        for i2 = 1, 5 do
+            local c = img.image[i]:sub(i2, i2)
+            if c == "1" then
+                ch = ch + 2^(i2-1)
+            end
+        end
+        if img.image[i]:sub(6, 6) == "1" then
+            ch = bit32.band(bit32.bnot(ch), 0x1F) + 0x80
+            fgc, bgc = bgc, fgc
+        end
+        if math.fmod(i - 1, img.width) == 0 and i > 1 then
+            y = y + 1
+            screen.setCursorPos(x, y)
+        end
+        screen.blit(string.char(ch), colors.toBlit(fgc), colors.toBlit(bgc))
+    end
+end
+
+-- Embedded sergal graphic data
+local sergalGraphicData = {
+    ["sergal"] = {
+        width = 12,
+        image = {
+            "110100",
+            "101111",
+            "001111",
+            "000011",
+            "000010",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "010000",
+            "111101",
+            "111111",
+            "111111",
+            "111111",
+            "001111",
+            "001111",
+            "000010",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "000011",
+            "001111",
+            "111111",
+            "111111",
+            "111111",
+            "111110",
+            "111101",
+            "111111",
+            "001010",
+            "000000",
+            "000000",
+            "011100",
+            "111101",
+            "111111",
+            "111111",
+            "111111",
+            "111111",
+            "111111",
+            "011111",
+            "111111",
+            "111111",
+            "101111",
+            "001011",
+            "000001",
+            "111111",
+            "111111",
+            "111111",
+            "111111",
+            "111111",
+            "111111",
+            "110011",
+            "111100",
+            "111100",
+            "111110",
+            "111000",
+            "011100",
+            "111001",
+            "111111",
+            "111111",
+            "111111",
+            "111111",
+            "111111",
+            "111100",
+            "111100",
+            "111000",
+            "000000",
+            "000000",
+            "000000",
+            "010101",
+            "111000",
+            "111111",
+            "111111",
+            "111111",
+            "111111",
+            "001011",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "010000",
+            "110100",
+            "111101",
+            "111111",
+            "111010",
+            "101000",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "000000",
+            "010000",
+            "101000",
+            "000000",
+            "000000",
+            "000000",
+            "000000"
+        }
+    }
+}
+
+-- Simple animated splash screen
 local function showAnimatedSplash()
     clearScreen()
     local w, h = term.getSize()
-
-    -- Create pixel box
-    local box = createPixelBox(term)
-
-    -- Your sergal art
-    local sergal_art = {
-        "XXX                    ",
-        " XXXXX                 ",
-        "  XXXXXXX              ",
-        "   XXXXXXXXX           ",
-        "    XXXXXXXXXX         ",
-        "     XXXXXXXXXXXX      ",
-        "      XXXXXXXXXXXX     ",
-        "    XXXXXXXXXXXXXX     ",
-        "  XXXXXXXXXX  XXXXX    ",
-        " XXXXXXXXXXX XXXXXXX   ",
-        "XXXXXXXXXXXXXXXXXXXXXXX",
-        "   XXXXXXXXXXXXXXXXXXXXX",
-        "  XXXXXXXXXXXXXXXXXXXXXX",
-        "  XXXXXXXXXXXX  XXXXXXX",
-        " XXXXXXXXXXXXXXX       ",
-        " XXXXXXXXXXXXXXXXXXX   ",
-        "XXX XXXXXXXXXXXXXXX    ",
-        "   XXXXXXXXXXX         ",
-        "   XXXXXXXXXXX         ",
-        "   XXXXXXXXXXXX        ",
-        "   XX XXXXXXXXXX       ",
-        "   X  XXXXXXXXXX       ",
-        "       XXXXXXXXXX      ",
-        "         XXXXXX X      ",
-        "           XXXX        ",
-        "             XX        ",
-        "              X        ",
-    }
-
-    -- Calculate centering
-    local artWidth = 23  -- Width of the widest line
-    local artHeight = #sergal_art
-    local pixelScale = 1
-
-    -- Center the sergal art on the canvas
-    local centerX = math.floor((box.width - artWidth) / 2)
-    local centerY = math.floor((box.height - artHeight - 10) / 2)  -- -10 to leave room for text
-
-    -- Ensure it fits on screen
-    if centerY < 2 then centerY = 2 end
 
     local rainbowColors = {
         colors.red, colors.orange, colors.yellow, colors.lime,
@@ -345,36 +324,31 @@ local function showAnimatedSplash()
         colors.purple, colors.magenta, colors.pink
     }
 
+    -- Calculate centering for the sergal (12 chars wide, ~9 rows tall based on the image data)
+    local sergalWidth = 12
+    local sergalHeight = math.ceil(#sergalGraphicData.sergal.image / sergalWidth)
+    local startX = math.floor((w - sergalWidth) / 2) + 1
+    local startY = math.floor((h - sergalHeight) / 2) - 2
+
+    -- Ensure it fits on screen
+    if startY < 1 then startY = 1 end
+
     -- Animation loop
     for cycle = 1, #rainbowColors do
         local currentColor = rainbowColors[cycle]
 
-        -- Clear box
-        box:clear(colors.black)
+        -- Clear screen
+        term.setBackgroundColor(colors.black)
+        term.clear()
 
-        -- Draw sergal with current color
-        for y = 1, #sergal_art do
-            local line = sergal_art[y]
-            for x = 1, #line do
-                if line:sub(x, x) == "X" then
-                    local px = centerX + x
-                    local py = centerY + y
-                    if px > 0 and px <= box.width and py > 0 and py <= box.height then
-                        box:setPixel(px, py, currentColor)
-                    end
-                end
-            end
-        end
-
-        -- Render the pixel art
-        box:render()
+        -- Draw sergal with current rainbow color
+        drawgraphic(term, sergalGraphicData, startX, startY, currentColor, colors.black)
 
         -- Draw text (stays white) - positioned below the sergal
-        local textY = math.min(h - 2, centerY / 3 + artHeight / 3 + 2)
+        local textY = math.min(h - 2, startY + sergalHeight + 2)
 
         local title = "KSSH Storage System"
         term.setCursorPos(math.floor((w - #title) / 2) + 1, textY)
-        term.setBackgroundColor(colors.black)
         term.setTextColor(colors.white)
         term.write(title)
 
@@ -525,7 +499,7 @@ local function installFiles(fileList, systemType, mode)
     return #errors == 0, errors, { total=total, updated=updated, skipped=skipped, errors=#errors }
 end
 
--- ========= Detection (FIXED) =========
+-- ========= Detection =========
 local function detectSystemType() return turtle and "turtle" or "computer" end
 
 local function detectExistingInstallation()
