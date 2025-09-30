@@ -53,6 +53,9 @@ function SettingsPage:new(context)
 
     o.width, o.height = term.getSize()
 
+    -- Clickable regions
+    o.backLink = {}
+
     return o
 end
 
@@ -83,14 +86,16 @@ function SettingsPage:drawHeader()
     term.clearLine()
     term.setTextColor(colors.white)
 
-    local title = " SYSTEM SETTINGS "
-    term.setCursorPos(math.floor((self.width - #title) / 2), 1)
-    term.write(title)
+    -- Title on the left
+    term.setCursorPos(2, 1)
+    term.write("SYSTEM SETTINGS")
 
-    -- Back link
-    term.setCursorPos(self.width - 10, 1)
+    -- Back link on the right
+    local x = self.width - 6
+    term.setCursorPos(x, 1)
     term.setTextColor(colors.yellow)
-    term.write("[B]ack")
+    term.write("Back")
+    self.backLink = {x1 = x, x2 = x + 3, y = 1}
 
     term.setBackgroundColor(colors.black)
 end
@@ -348,7 +353,7 @@ function SettingsPage:confirmEdit()
     self:render()
 end
 
-function SettingsPage:handleInput(event, param1, param2)
+function SettingsPage:handleInput(event, param1, param2, param3)
     if event == "key" then
         local key = param1
 
@@ -365,10 +370,8 @@ function SettingsPage:handleInput(event, param1, param2)
                 end
             end
         else
-            if key == keys.b then
-                -- Go back
-                self.context.viewFactory:switchTo("console")
-            elseif key == keys.up then
+            -- Removed 'B' key binding to avoid conflicts
+            if key == keys.up then
                 self.selectedSetting = math.max(1, self.selectedSetting - 1)
                 self:render()
             elseif key == keys.down then
@@ -397,6 +400,21 @@ function SettingsPage:handleInput(event, param1, param2)
     elseif event == "char" and self.editing then
         self.editValue = self.editValue .. param1
         self:render()
+    elseif event == "mouse_click" then
+        -- param1 = button, param2 = x, param3 = y
+        self:handleClick(param2, param3)
+    end
+end
+
+function SettingsPage:handleClick(x, y)
+    -- Check back link
+    if y == self.backLink.y and x >= self.backLink.x1 and x <= self.backLink.x2 then
+        if self.context.router then
+            self.context.router:navigate("console")
+        elseif self.context.viewFactory then
+            self.context.viewFactory:switchTo("console")
+        end
+        return
     end
 end
 

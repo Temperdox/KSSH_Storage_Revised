@@ -151,6 +151,7 @@ end
 
 function HashOA_RRSC:resize()
     local oldBuckets = self.buckets
+    local oldCapacity = self.capacity
     self.capacity = self.capacity * 2
     self.buckets = {}
     self.size = 0
@@ -159,7 +160,9 @@ function HashOA_RRSC:resize()
         self.buckets[i] = nil
     end
 
-    for _, bucket in ipairs(oldBuckets) do
+    -- Use numeric for loop instead of ipairs to iterate all bucket indices
+    for i = 1, oldCapacity do
+        local bucket = oldBuckets[i]
         if bucket then
             self:put(bucket.key, bucket.value)
             if bucket.chain then
@@ -173,16 +176,36 @@ end
 
 function HashOA_RRSC:getAllItems()
     local items = {}
-    for _, bucket in ipairs(self.buckets) do
+    local bucketCount = 0
+    local chainCount = 0
+
+    -- Use numeric for loop instead of ipairs to iterate all bucket indices
+    -- ipairs stops at first nil, but hash table has sparse buckets
+    for i = 1, self.capacity do
+        local bucket = self.buckets[i]
         if bucket then
+            bucketCount = bucketCount + 1
             table.insert(items, {key = bucket.key, value = bucket.value})
             if bucket.chain then
                 for k, v in pairs(bucket.chain) do
+                    chainCount = chainCount + 1
                     table.insert(items, {key = k, value = v})
                 end
             end
         end
     end
+
+    -- Debug logging
+    if self.eventBus then
+        self.eventBus:publish("log.debug", {
+            source = "HashOA_RRSC",
+            message = string.format(
+                "getAllItems: %d items (%d buckets, %d chains), size=%d",
+                #items, bucketCount, chainCount, self.size
+            )
+        })
+    end
+
     return items
 end
 
@@ -199,16 +222,34 @@ function HashOA_RRSC:clear()
 end
 
 function HashOA_RRSC:save(path)
+    local items = self:getAllItems()
+
+    -- Ensure items is treated as array, not object
+    if #items == 0 then
+        items = textutils.empty_json_array or {}
+    end
+
     local data = {
         size = self.size,
         capacity = self.capacity,
-        items = self:getAllItems()
+        items = items
     }
 
     local file = fs.open(path, "w")
     if file then
-        file.write(textutils.serialiseJSON(data))
+        local json = textutils.serialiseJSON(data)
+        -- Fix empty array serialization
+        json = json:gsub('"items":%s*{}', '"items":[]')
+        file.write(json)
         file.close()
+
+        if self.eventBus then
+            self.eventBus:publish("log.info", {
+                source = "HashOA_RRSC",
+                message = string.format("Saved %d items to %s", #items, path)
+            })
+        end
+
         return true
     end
     return false
@@ -216,6 +257,12 @@ end
 
 function HashOA_RRSC:load(path)
     if not fs.exists(path) then
+        if self.eventBus then
+            self.eventBus:publish("log.info", {
+                source = "HashOA_RRSC",
+                message = "No index file found, starting fresh"
+            })
+        end
         return false
     end
 
@@ -227,16 +274,34 @@ function HashOA_RRSC:load(path)
     local content = file.readAll()
     file.close()
 
+    -- Fix malformed JSON where items is {} instead of []
+    content = content:gsub('"items":%s*{}', '"items":[]')
+
     local ok, data = pcall(textutils.unserialiseJSON, content)
     if not ok or not data then
+        if self.eventBus then
+            self.eventBus:publish("log.error", {
+                source = "HashOA_RRSC",
+                message = "Failed to parse index file: " .. tostring(data)
+            })
+        end
         return false
     end
 
     self:clear()
     self.capacity = data.capacity or 256
 
+    local itemCount = 0
     for _, item in ipairs(data.items or {}) do
         self:put(item.key, item.value)
+        itemCount = itemCount + 1
+    end
+
+    if self.eventBus then
+        self.eventBus:publish("log.info", {
+            source = "HashOA_RRSC",
+            message = string.format("Loaded %d items from %s", itemCount, path)
+        })
     end
 
     return true

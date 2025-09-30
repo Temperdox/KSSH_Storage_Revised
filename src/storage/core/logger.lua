@@ -4,14 +4,16 @@
 local Logger = {}
 Logger.__index = Logger
 
-function Logger:new(eventBus, level)
+function Logger:new(eventBus, level, fileLevel)
     local o = setmetatable({}, self)
     o.eventBus = eventBus
     o.levels = {trace = 1, debug = 2, info = 3, warn = 4, error = 5, critical = 6}
-    o.level = o.levels[level] or 4  -- Default to WARN level
+    o.level = o.levels[level] or 4  -- Default to WARN level for console
+    o.fileLevel = o.levels[fileLevel or "warn"] or 4  -- Default to WARN level for file
     o.ringBuffer = {}
     o.maxRingSize = 100  -- Reduced from 1000
-    o.basePath = "/storage/logs"
+    o.diskManager = nil  -- Will be set by startup
+    o.basePath = "/storage/logs"  -- Fallback path if no disk manager
 
     -- Events to completely ignore (too noisy)
     o.ignoredEvents = {
@@ -47,9 +49,12 @@ function Logger:new(eventBus, level)
     return o
 end
 
-function Logger:shouldLog(level, source, message)
+function Logger:shouldLog(level, source, message, forFile)
+    -- Use appropriate level threshold
+    local threshold = forFile and self.fileLevel or self.level
+
     -- Check level threshold
-    if self.levels[level] < self.level then
+    if self.levels[level] < threshold then
         return false
     end
 
@@ -61,7 +66,7 @@ function Logger:shouldLog(level, source, message)
     end
 
     -- Check if it's a debug-only event and we're above debug level
-    if self.level > self.levels.debug then
+    if threshold > self.levels.debug then
         for _, debugEvent in ipairs(self.debugOnlyEvents) do
             if source == debugEvent or source:match("^" .. debugEvent:gsub("%.", "%%.")) then
                 return false
@@ -73,8 +78,14 @@ function Logger:shouldLog(level, source, message)
 end
 
 function Logger:log(level, source, message, data)
-    -- Filter out noisy events
-    if not self:shouldLog(level, source, message) then
+    -- Check if we should log to console (ring buffer)
+    local shouldLogConsole = self:shouldLog(level, source, message, false)
+
+    -- Check if we should log to file
+    local shouldLogFile = self:shouldLog(level, source, message, true)
+
+    -- If neither console nor file logging is enabled for this level, skip entirely
+    if not shouldLogConsole and not shouldLogFile then
         return
     end
 
@@ -87,20 +98,44 @@ function Logger:log(level, source, message, data)
         time = os.date("%H:%M:%S")
     }
 
-    -- Add to ring buffer
-    table.insert(self.ringBuffer, entry)
-    if #self.ringBuffer > self.maxRingSize then
-        table.remove(self.ringBuffer, 1)
+    -- Add to ring buffer only if console logging is enabled
+    if shouldLogConsole then
+        table.insert(self.ringBuffer, entry)
+        if #self.ringBuffer > self.maxRingSize then
+            table.remove(self.ringBuffer, 1)
+        end
     end
 
-    -- Only write important events to file (warn and above)
-    if self.levels[level] >= self.levels.warn then
+    -- Write to file only if file logging is enabled
+    if shouldLogFile then
         local date = os.date("%Y%m%d")
-        local filename = string.format("%s/app-%s.log", self.basePath, date)
-        local file = fs.open(filename, "a")
-        if file then
-            file.writeLine(textutils.serialiseJSON(entry))
-            file.close()
+        local logLine = textutils.serialiseJSON(entry)
+
+        if self.diskManager then
+            -- Use disk manager for automatic failover
+            local levelFilename = string.format("app_%s-%s.log", level, date)
+            local combinedFilename = string.format("app_all-%s.log", date)
+
+            -- Write to level-specific log
+            self.diskManager:appendFile("logs", levelFilename, logLine)
+
+            -- Write to combined log
+            self.diskManager:appendFile("logs", combinedFilename, logLine)
+        else
+            -- Fallback to local filesystem
+            local filename = string.format("%s/app_%s-%s.log", self.basePath, level, date)
+            local file = fs.open(filename, "a")
+            if file then
+                file.writeLine(logLine)
+                file.close()
+            end
+
+            local combinedFilename = string.format("%s/app_all-%s.log", self.basePath, date)
+            local combinedFile = fs.open(combinedFilename, "a")
+            if combinedFile then
+                combinedFile.writeLine(logLine)
+                combinedFile.close()
+            end
         end
     end
 
@@ -149,19 +184,49 @@ function Logger:cleanupOldLogs(daysToKeep)
     daysToKeep = daysToKeep or 7
     local cutoffTime = os.epoch("utc") - (daysToKeep * 24 * 60 * 60 * 1000)
 
-    local files = fs.list(self.basePath)
-    for _, filename in ipairs(files) do
-        if filename:match("^app%-%d+%.log$") then
-            local path = fs.combine(self.basePath, filename)
-            local file = fs.open(path, "r")
-            if file then
-                local firstLine = file.readLine()
-                file.close()
+    if self.diskManager then
+        -- Clean logs on all disks
+        for _, disk in ipairs(self.diskManager.disks) do
+            local logsPath = fs.combine(disk.mountPath, "logs")
+            if fs.exists(logsPath) and fs.isDir(logsPath) then
+                local files = fs.list(logsPath)
+                for _, filename in ipairs(files) do
+                    if filename:match("^app.*%-%d+%.log$") then
+                        local path = fs.combine(logsPath, filename)
+                        local file = fs.open(path, "r")
+                        if file then
+                            local firstLine = file.readLine()
+                            file.close()
 
-                if firstLine then
-                    local ok, entry = pcall(textutils.unserialiseJSON, firstLine)
-                    if ok and entry and entry.timestamp and entry.timestamp < cutoffTime then
-                        fs.delete(path)
+                            if firstLine then
+                                local ok, entry = pcall(textutils.unserialiseJSON, firstLine)
+                                if ok and entry and entry.timestamp and entry.timestamp < cutoffTime then
+                                    fs.delete(path)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    else
+        -- Fallback to local filesystem
+        if fs.exists(self.basePath) and fs.isDir(self.basePath) then
+            local files = fs.list(self.basePath)
+            for _, filename in ipairs(files) do
+                if filename:match("^app.*%-%d+%.log$") then
+                    local path = fs.combine(self.basePath, filename)
+                    local file = fs.open(path, "r")
+                    if file then
+                        local firstLine = file.readLine()
+                        file.close()
+
+                        if firstLine then
+                            local ok, entry = pcall(textutils.unserialiseJSON, firstLine)
+                            if ok and entry and entry.timestamp and entry.timestamp < cutoffTime then
+                                fs.delete(path)
+                            end
+                        end
                     end
                 end
             end

@@ -45,42 +45,114 @@ local function startup()
     local Scheduler = require("core.scheduler")
     local Logger = require("core.logger")
     local TimeWheel = require("core.timewheel")
+    local DiskManager = require("core.disk_manager")
 
-    -- Create directories
-    fsx.ensureDir(BASE_PATH .. "/cfg")
-    fsx.ensureDir(BASE_PATH .. "/cfg/themes")
-    fsx.ensureDir(BASE_PATH .. "/data")
-    fsx.ensureDir(BASE_PATH .. "/logs")
-
-    -- Load settings
-    local settingsPath = BASE_PATH .. "/cfg/settings.json"
-    local settings = fsx.readJson(settingsPath) or {
-        theme = "dark",
-        logLevel = "error",
-        inputSide = "right",
-        outputSide = "left",
-        soundEnabled = true,
-        soundVolume = 0.5,
-        pools = {
-            io = 4,
-            index = 2,
-            ui = 2,
-            net = 2
-        },
-        ui = {
-            maxLogs = 50,
-            autoScroll = true,
-            showTimestamps = true
-        }
-    }
-    fsx.writeJson(settingsPath, settings)
-
-    -- Initialize core systems
+    -- Initialize event bus early for disk manager
     local eventBus = EventBus:new()
 
-    -- Create logger that uses the print buffer
-    local logger = Logger:new(eventBus, settings.logLevel)
+    -- Initialize disk manager and check for disks
+    local diskManager = DiskManager:new(eventBus)
+    local diskCount = diskManager:scanForDisks()
+
+    if diskCount == 0 then
+        -- No disks found - show warning and wait
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.red)
+        term.clear()
+        term.setCursorPos(1, 1)
+        print("=" .. string.rep("=", 49))
+        print("  DISK DRIVE REQUIRED")
+        print("=" .. string.rep("=", 49))
+        print("")
+        term.setTextColor(colors.yellow)
+        print("This system requires at least one disk drive")
+        print("connected to the wired network with a floppy")
+        print("disk inserted.")
+        print("")
+        print("The disk will be used to store:")
+        term.setTextColor(colors.white)
+        print("  - Configuration files")
+        print("  - Data files")
+        print("  - Log files")
+        print("")
+        term.setTextColor(colors.yellow)
+        print("Please:")
+        term.setTextColor(colors.white)
+        print("  1. Connect a disk drive to the wired network")
+        print("  2. Insert a floppy disk into the drive")
+        print("  3. Press any key to continue...")
+        print("")
+        term.setTextColor(colors.gray)
+        print("Tip: Use two disk drives for automatic failover")
+        print("when one disk fills up.")
+
+        -- Wait for key press
+        os.pullEvent("key")
+
+        -- Rescan for disks
+        diskCount = diskManager:scanForDisks()
+
+        if diskCount == 0 then
+            term.setTextColor(colors.red)
+            print("")
+            print("ERROR: Still no disk drives found!")
+            print("System cannot continue without storage.")
+            term.setTextColor(colors.white)
+            return
+        end
+    end
+
+    -- Show disk status
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.lime)
+    print(string.format("Disk drives found: %d", diskCount))
+    local status = diskManager:getStatus()
+    if status.currentDisk then
+        term.setTextColor(colors.white)
+        print(string.format("Using: %s (%d%% used)",
+            status.currentDisk.mountPath,
+            status.currentDisk.usedPercent))
+    end
+
+    -- Load settings from disk
+    local settingsFilename = "settings.json"
+    local settingsContent = diskManager:readFile("config", settingsFilename)
+    local settings
+    if settingsContent then
+        local ok, data = pcall(textutils.unserialiseJSON, settingsContent)
+        settings = ok and data or nil
+    end
+
+    -- Default settings if not found
+    if not settings then
+        settings = {
+            theme = "dark",
+            logLevel = "debug",  -- Console log level
+            fileLogLevel = "warn",  -- File log level
+            inputSide = "right",
+            outputSide = "left",
+            soundEnabled = true,
+            soundVolume = 0.5,
+            pools = {
+                io = 4,
+                index = 2,
+                ui = 2,
+                net = 2
+            },
+            ui = {
+                maxLogs = 100,
+                autoScroll = true,
+                showTimestamps = true
+            }
+        }
+        -- Save default settings to disk
+        diskManager:writeFile("config", settingsFilename, textutils.serialiseJSON(settings))
+    end
+
+    -- Create logger that uses the print buffer and disk manager
+    local logger = Logger:new(eventBus, settings.logLevel, settings.fileLogLevel)
     logger.printBuffer = printBuffer  -- Share the print buffer
+    logger.diskManager = diskManager  -- Use disk manager for file writes
 
     -- Initialize scheduler
     local scheduler = Scheduler:new(eventBus)
@@ -132,6 +204,7 @@ local function startup()
         storageMap = storageMap,
         bufferInventory = bufferInventory,
         timeWheel = timeWheel,
+        diskManager = diskManager,  -- Add disk manager to context
         basePath = BASE_PATH,
         running = true,
         startTime = os.epoch("utc"),

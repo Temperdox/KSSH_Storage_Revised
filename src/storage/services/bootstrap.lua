@@ -34,6 +34,7 @@ function Bootstrap:discover()
     local largestSize = 0
 
     -- Scan all inventories
+    self.logger:info("Bootstrap", string.format("Scanning %d peripherals...", #peripherals))
     for _, name in ipairs(peripherals) do
         local pType = peripheral.getType(name)
 
@@ -57,8 +58,15 @@ function Bootstrap:discover()
                     largestStorage = storage
                 end
 
+                self.logger:info("Bootstrap", string.format(
+                        "Found inventory [%d]: %s (%s) - %d slots",
+                        storage.id, name, pType, size
+                ))
+            end
+        else
+            if pType then
                 self.logger:debug("Bootstrap", string.format(
-                        "Found %s: %d slots", name, size
+                    "Skipping non-inventory: %s (%s)", name, pType
                 ))
             end
         end
@@ -72,11 +80,22 @@ function Bootstrap:discover()
         error("[ERROR] Could not determine buffer inventory!")
     end
 
+    self.logger:info("Bootstrap", string.format(
+        "Selected buffer: %s (%d slots)", largestStorage.name, largestStorage.size
+    ))
+
     -- Remove buffer from storage list
     local finalStorages = {}
     for _, storage in ipairs(storages) do
         if storage.id ~= largestStorage.id then
             table.insert(finalStorages, storage)
+            self.logger:info("Bootstrap", string.format(
+                "Adding to storage list: %s", storage.name
+            ))
+        else
+            self.logger:info("Bootstrap", string.format(
+                "Removing buffer from storage list: %s", storage.name
+            ))
         end
     end
 

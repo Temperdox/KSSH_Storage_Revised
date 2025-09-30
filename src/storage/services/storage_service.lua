@@ -56,15 +56,20 @@ end
 function StorageService:start()
     self.running = true
 
+    -- ALWAYS rebuild index immediately on startup, regardless of discovery mode
+    self.logger:info("StorageService", "Building initial index from all inventories...")
+    self:rebuildIndexAllInventories()
+
     if self.discoveryMode then
-        self.logger:info("StorageService", "Starting auto-discovery...")
+        self.logger:info("StorageService", "Starting auto-discovery for input/output...")
         self.scheduler:submit("io", function()
             self:runDiscovery()
         end)
     else
         -- Normal operation
         self:initializePeripherals()
-        self:rebuildIndex()
+
+        self.logger:info("StorageService", "Submitting IO tasks to scheduler...")
 
         self.scheduler:submit("io", function()
             self:monitorInput()
@@ -73,6 +78,15 @@ function StorageService:start()
         self.scheduler:submit("io", function()
             self:processBuffer()
         end)
+
+        -- Start periodic sync to monitor service
+        self.logger:info("StorageService", "Submitting syncToMonitor task...")
+        self.scheduler:submit("io", function()
+            self.logger:info("StorageService", "syncToMonitor task STARTED in scheduler")
+            self:syncToMonitor()
+        end)
+
+        self.logger:info("StorageService", "All IO tasks submitted")
     end
 
     -- Subscribe to events
@@ -310,6 +324,11 @@ function StorageService:assignBufferAndSave()
 
     self.scheduler:submit("io", function()
         self:processBuffer()
+    end)
+
+    -- Start periodic sync to monitor service
+    self.scheduler:submit("io", function()
+        self:syncToMonitor()
     end)
 end
 
@@ -569,36 +588,131 @@ function StorageService:updateIndex(itemName, count, operation)
     })
 end
 
-function StorageService:rebuildIndex()
-    self.logger:info("StorageService", "Rebuilding item index...")
+function StorageService:rebuildIndexAllInventories()
+    self.logger:info("StorageService", "=== SCANNING ALL INVENTORIES (NO CONFIG) ===")
 
     self.itemIndex:clear()
     local totalItems = 0
+    local totalSlots = 0
+
+    -- Scan ALL network inventories, no skip list
+    local scannedCount = 0
+    for _, name in ipairs(self.modem.getNamesRemote()) do
+        local pType = peripheral.getType(name)
+
+        -- Check if it's an inventory type
+        if pType and (pType:find("chest") or pType:find("barrel") or pType:find("drawer") or
+                      pType:find("storage") or pType:find("shulker")) then
+            scannedCount = scannedCount + 1
+            self.logger:info("StorageService", string.format(">>> Scanning %s (%s)", name, pType))
+
+            local inv = peripheral.wrap(name)
+            if inv and inv.list then
+                local ok, slots = pcall(function() return inv.list() end)
+                if ok and slots then
+                    local slotCount = 0
+                    for _ in pairs(slots) do slotCount = slotCount + 1 end
+                    totalSlots = totalSlots + slotCount
+
+                    self.logger:info("StorageService", string.format("    Found %d items in %s", slotCount, name))
+
+                    for slot, item in pairs(slots) do
+                        local current = self.itemIndex:get(item.name) or {
+                            count = 0,
+                            stackSize = item.maxCount or 64,
+                            nbtHash = item.nbt,
+                            locations = {}
+                        }
+
+                        current.count = current.count + item.count
+                        table.insert(current.locations, {
+                            name = name,
+                            slot = slot,
+                            count = item.count
+                        })
+
+                        self.itemIndex:put(item.name, current)
+                        totalItems = totalItems + 1
+                    end
+                else
+                    self.logger:error("StorageService", "FAILED to scan: " .. name)
+                end
+            else
+                self.logger:error("StorageService", "FAILED to wrap: " .. name)
+            end
+        end
+    end
+
+    self.itemIndex:save("/storage/data/item_index.dat")
+
+    local uniqueCount = self.itemIndex:getSize()
+
+    self.logger:info("StorageService", "=== INITIAL INDEX COMPLETE ===")
+    self.logger:info("StorageService", string.format("Scanned: %d inventories", scannedCount))
+    self.logger:info("StorageService", string.format("Unique items: %d", uniqueCount))
+    self.logger:info("StorageService", string.format("Total slots: %d", totalSlots))
+    self.logger:info("StorageService", string.format("Total stacks: %d", totalItems))
+
+    self.eventBus:publish("storage.indexRebuilt", {
+        uniqueCount = uniqueCount,
+        totalStacks = totalItems,
+        timestamp = os.epoch("utc")
+    })
+
+    self.logger:info("StorageService", "Published storage.indexRebuilt event")
+end
+
+function StorageService:rebuildIndex()
+    self.logger:info("StorageService", "=== STARTING INDEX REBUILD ===")
+    self.logger:info("StorageService", string.format("StorageMap has %d inventories", #self.storageMap))
+
+    self.itemIndex:clear()
+    local totalItems = 0
+    local totalSlots = 0
 
     -- Build skip list for special inventories
     local skipList = {}
     if self.inputConfig and self.inputConfig.networkId then
         skipList[self.inputConfig.networkId] = true
+        self.logger:info("StorageService", "Skip input: " .. self.inputConfig.networkId)
     end
     if self.outputConfig and self.outputConfig.networkId then
         skipList[self.outputConfig.networkId] = true
+        self.logger:info("StorageService", "Skip output: " .. self.outputConfig.networkId)
     end
     if self.bufferInventory then
         local bufferName = self.bufferInventory.name or self.bufferInventory.networkId
         if bufferName then
             skipList[bufferName] = true
+            self.logger:info("StorageService", "Skip buffer: " .. bufferName)
         end
+    end
+
+    self.logger:info("StorageService", string.format("StorageMap contains %d entries:", #self.storageMap))
+    for i, storage in ipairs(self.storageMap) do
+        self.logger:info("StorageService", string.format("  [%d] name=%s, id=%d, type=%s, size=%d",
+            i, storage.name or "nil", storage.id or 0, storage.type or "nil", storage.size or 0))
     end
 
     for _, storage in ipairs(self.storageMap) do
         -- Skip input, output, buffer
-        if not skipList[storage.name] then
-            self.logger:debug("StorageService", "Scanning storage: " .. storage.name)
+        local shouldSkip = skipList[storage.name]
+        self.logger:info("StorageService", string.format("Checking storage: %s (skipList[%s] = %s)",
+            storage.name, storage.name, tostring(shouldSkip)))
+
+        if not shouldSkip then
+            self.logger:info("StorageService", string.format(">>> Scanning storage: %s", storage.name))
 
             local inv = peripheral.wrap(storage.name)
             if inv then
                 local ok, slots = pcall(function() return inv.list() end)
                 if ok and slots then
+                    local slotCount = 0
+                    for _ in pairs(slots) do slotCount = slotCount + 1 end
+                    totalSlots = totalSlots + slotCount
+
+                    self.logger:info("StorageService", string.format("    Found %d items in %s", slotCount, storage.name))
+
                     for slot, item in pairs(slots) do
                         local current = self.itemIndex:get(item.name) or {
                             count = 0,
@@ -617,43 +731,93 @@ function StorageService:rebuildIndex()
                         self.itemIndex:put(item.name, current)
                         totalItems = totalItems + 1
 
-                        -- FIX: Publish event for each item indexed
+                        -- Publish event for each item indexed
+                        self.logger:debug("StorageService", string.format("    Indexed: %s x%d", item.name, item.count))
                         self.eventBus:publish("storage.itemIndexed", {
-                            key = item.name,  -- Use 'key' to match monitor expectations
-                            item = item.name, -- Also include 'item' for compatibility
+                            key = item.name,
+                            item = item.name,
                             count = current.count,
                             storage = storage.name
                         })
                     end
-                    self.logger:debug("StorageService", string.format(
-                            "Scanned %s: found %d slots", storage.name, #slots
-                    ))
                 else
-                    self.logger:warn("StorageService", "Failed to scan: " .. storage.name)
+                    self.logger:error("StorageService", "FAILED to scan: " .. storage.name)
                 end
             else
-                self.logger:warn("StorageService", "Could not wrap: " .. storage.name)
+                self.logger:error("StorageService", "FAILED to wrap: " .. storage.name)
             end
         else
-            self.logger:debug("StorageService", "Skipping special inventory: " .. storage.name)
+            self.logger:info("StorageService", "Skipping special inventory: " .. storage.name)
         end
     end
 
     self.itemIndex:save("/storage/data/item_index.dat")
 
+    local uniqueCount = self.itemIndex:getSize()
+
+    self.logger:info("StorageService", "=== INDEX REBUILD COMPLETE ===")
+    self.logger:info("StorageService", string.format("Unique items: %d", uniqueCount))
+    self.logger:info("StorageService", string.format("Total slots: %d", totalSlots))
+    self.logger:info("StorageService", string.format("Total stacks: %d", totalItems))
+
     self.eventBus:publish("storage.indexRebuilt", {
-        uniqueItems = self.itemIndex:getSize(),
+        uniqueItems = uniqueCount,
         totalStacks = totalItems
     })
 
-    self.logger:info("StorageService", string.format(
-            "Index rebuilt: %d unique items, %d stacks",
-            self.itemIndex:getSize(), totalItems
-    ))
+    self.logger:info("StorageService", "Published storage.indexRebuilt event")
 end
 
 function StorageService:getItems()
-    return self.itemIndex:getAllItems()
+    local items = self.itemIndex:getAllItems()
+    local size = self.itemIndex:getSize()
+
+    self.logger:debug("StorageService", string.format(
+        "getItems called: returning %d items, index size: %d",
+        #items, size
+    ))
+
+    return items
+end
+
+function StorageService:syncToMonitor()
+    self.logger:info("StorageService", "Starting periodic sync to monitor service...")
+
+    local syncCount = 0
+
+    while self.running do
+        -- Wait 1 second
+        os.sleep(1)
+        syncCount = syncCount + 1
+
+        -- Get current items from index
+        local items = self.itemIndex:getAllItems()
+        local uniqueCount = self.itemIndex:getSize()
+
+        -- Log every sync (every second) to both console and log file
+        self.logger:info("StorageService", string.format(
+            "SYNC CHECK #%d: Index has %d unique items, %d total entries",
+            syncCount, uniqueCount, #items
+        ))
+
+        -- Sync to monitor service if available
+        if self.context.services and self.context.services.monitor then
+            -- Directly update monitor's cache
+            if self.context.services.monitor.updateCache then
+                self.context.services.monitor:updateCache(items, uniqueCount)
+                self.logger:info("StorageService", string.format(
+                    "Synced %d items (%d unique) to monitor service [sync #%d]",
+                    #items, uniqueCount, syncCount
+                ))
+            else
+                self.logger:warn("StorageService", "Monitor service has no updateCache method!")
+            end
+        else
+            self.logger:warn("StorageService", "Monitor service not available for sync!")
+        end
+    end
+
+    self.logger:info("StorageService", "Stopped periodic sync to monitor service")
 end
 
 function StorageService:searchItems(query)

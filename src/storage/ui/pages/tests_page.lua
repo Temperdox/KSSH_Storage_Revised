@@ -49,6 +49,14 @@ function TestsPage:new(context)
 
     o.width, o.height = term.getSize()
 
+    -- Scroll state
+    o.testScrollOffset = 0
+    o.maxVisibleTests = 4
+
+    -- Clickable regions
+    o.backLink = {}
+    o.testRegions = {}
+
     return o
 end
 
@@ -88,27 +96,44 @@ function TestsPage:drawHeader()
     term.clearLine()
     term.setTextColor(colors.white)
 
-    local title = " SYSTEM TESTS "
-    term.setCursorPos(math.floor((self.width - #title) / 2), 1)
-    term.write(title)
+    -- Title on the left
+    term.setCursorPos(2, 1)
+    term.write("SYSTEM TESTS")
 
-    -- Back link
-    term.setCursorPos(self.width - 10, 1)
+    -- Back link on the right
+    local x = self.width - 6
+    term.setCursorPos(x, 1)
     term.setTextColor(colors.yellow)
-    term.write("[B]ack")
+    term.write("Back")
+    self.backLink = {x1 = x, x2 = x + 3, y = 1}
 
     term.setBackgroundColor(colors.black)
 end
 
 function TestsPage:drawTestList()
-    local y = 3
+    local startY = 4
+    local linesPerTest = 3  -- Name line + description line + blank line
 
-    term.setCursorPos(1, y)
+    term.setCursorPos(1, 3)
     term.setTextColor(colors.white)
     term.write("AVAILABLE TESTS:")
-    y = y + 1
 
-    for i, test in ipairs(self.tests) do
+    -- Calculate visible test range
+    local visibleStart = self.testScrollOffset + 1
+    local visibleEnd = math.min(visibleStart + self.maxVisibleTests - 1, #self.tests)
+
+    -- Clear test area
+    for clearY = startY, startY + (self.maxVisibleTests * linesPerTest) - 1 do
+        term.setCursorPos(1, clearY)
+        term.clearLine()
+    end
+
+    -- Draw visible tests
+    self.testRegions = {}
+    local y = startY
+    for i = visibleStart, visibleEnd do
+        local test = self.tests[i]
+
         term.setCursorPos(2, y)
 
         -- Test number/key
@@ -141,6 +166,9 @@ function TestsPage:drawTestList()
             end
         end
 
+        -- Store clickable region
+        self.testRegions[i] = {x1 = 2, x2 = self.width - 1, y1 = y, y2 = y + 1, testId = test.id, testIndex = i}
+
         y = y + 1
 
         -- Description
@@ -148,6 +176,27 @@ function TestsPage:drawTestList()
         term.setTextColor(colors.lightGray)
         term.write(test.description)
         y = y + 2
+    end
+
+    -- Draw scroll bar if needed
+    if #self.tests > self.maxVisibleTests then
+        local scrollBarHeight = self.maxVisibleTests * linesPerTest
+        local scrollBarY = startY
+        local scrollBarPos = math.floor(self.testScrollOffset / (#self.tests - self.maxVisibleTests) * (scrollBarHeight - 1))
+
+        for i = 0, scrollBarHeight - 1 do
+            term.setCursorPos(self.width, scrollBarY + i)
+            if i == scrollBarPos then
+                term.setBackgroundColor(colors.black)
+                term.setTextColor(colors.white)
+                term.write("\138")  -- Slim scroll indicator
+            else
+                term.setBackgroundColor(colors.lightGray)
+                term.setTextColor(colors.black)
+                term.write("\149")  -- Track character
+            end
+        end
+        term.setBackgroundColor(colors.black)
     end
 end
 
@@ -551,23 +600,11 @@ function TestsPage:saveTestResults()
     end
 end
 
-function TestsPage:handleInput(event, key)
+function TestsPage:handleInput(event, param1, param2, param3)
     if event == "key" then
-        if key == keys.b then
-            -- Go back - check different navigation methods
-            if self.context.router then
-                -- Use router if available
-                self.context.router:navigate("console")
-            elseif self.context.viewFactory and self.context.viewFactory.switchTo then
-                -- Use viewFactory if available
-                self.context.viewFactory:switchTo("console")
-            else
-                -- Fallback: just clear and print message
-                term.clear()
-                term.setCursorPos(1, 1)
-                print("Returning to console...")
-            end
-        elseif key == keys.c then
+        local key = param1
+        -- Removed 'B' key binding to avoid conflicts
+        if key == keys.c then
             -- Clear output
             self.testOutput = {}
             self:render()
@@ -575,12 +612,47 @@ function TestsPage:handleInput(event, key)
             -- Stop test
             self:addOutput("[WARN] Test stopped by user")
             self:completeTest(self.runningTest, false, {stopped = true})
+        elseif key == keys.up then
+            -- Scroll up
+            self.testScrollOffset = math.max(0, self.testScrollOffset - 1)
+            self:render()
+        elseif key == keys.down then
+            -- Scroll down
+            local maxScroll = math.max(0, #self.tests - self.maxVisibleTests)
+            self.testScrollOffset = math.min(maxScroll, self.testScrollOffset + 1)
+            self:render()
         elseif key >= keys.one and key <= keys.five then
             -- Run test by number
             local testIndex = key - keys.one + 1
             if self.tests[testIndex] then
                 self:runTest(self.tests[testIndex].id)
             end
+        end
+    elseif event == "mouse_scroll" then
+        -- Handle mouse scroll
+        local maxScroll = math.max(0, #self.tests - self.maxVisibleTests)
+        self.testScrollOffset = math.max(0, math.min(maxScroll, self.testScrollOffset + param1))
+        self:render()
+    elseif event == "mouse_click" then
+        -- param1 = button, param2 = x, param3 = y
+        self:handleClick(param2, param3)
+    end
+end
+
+function TestsPage:handleClick(x, y)
+    -- Check back link
+    if y == self.backLink.y and x >= self.backLink.x1 and x <= self.backLink.x2 then
+        if self.context.router then
+            self.context.router:navigate("console")
+        end
+        return
+    end
+
+    -- Check test regions
+    for _, region in pairs(self.testRegions) do
+        if y >= region.y1 and y <= region.y2 and x >= region.x1 and x <= region.x2 then
+            self:runTest(region.testId)
+            return
         end
     end
 end

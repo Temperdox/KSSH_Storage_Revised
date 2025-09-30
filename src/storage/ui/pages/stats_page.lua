@@ -23,6 +23,22 @@ function StatsPage:new(context)
 
     o.width, o.height = term.getSize()
 
+    -- Clickable regions
+    o.backLink = {}
+    o.tabRegions = {}
+
+    -- Modal state
+    o.showModal = false
+    o.selectedPool = nil
+
+    -- Uptime graph state
+    o.uptimeData = {}
+    o.uptimeGraphRegion = {}
+    o.hoveredUptimeIndex = nil
+
+    -- Render state
+    o.needsFullRedraw = true
+
     return o
 end
 
@@ -35,11 +51,20 @@ function StatsPage:onEnter()
         self:updateStats(event, data)
     end)
 
+    self.needsFullRedraw = true
     self:render()
 end
 
+function StatsPage:onLeave()
+    -- Clean up
+end
+
 function StatsPage:render()
-    term.clear()
+    -- Only clear screen on full redraw
+    if self.needsFullRedraw then
+        term.clear()
+        self.needsFullRedraw = false
+    end
 
     -- Header
     self:drawHeader()
@@ -62,6 +87,11 @@ function StatsPage:render()
 
     -- Footer
     self:drawFooter()
+
+    -- Modal (draw on top)
+    if self.showModal and self.selectedPool then
+        self:drawPoolModal()
+    end
 end
 
 function StatsPage:drawHeader()
@@ -70,22 +100,26 @@ function StatsPage:drawHeader()
     term.clearLine()
     term.setTextColor(colors.white)
 
-    local title = " SYSTEM STATISTICS "
-    term.setCursorPos(math.floor((self.width - #title) / 2), 1)
-    term.write(title)
+    -- Title on the left
+    term.setCursorPos(2, 1)
+    term.write("SYSTEM STATISTICS")
 
-    -- Back link
-    term.setCursorPos(self.width - 10, 1)
+    -- Back link on the right
+    local x = self.width - 6
+    term.setCursorPos(x, 1)
     term.setTextColor(colors.yellow)
-    term.write("[B]ack")
+    term.write("Back")
+    self.backLink = {x1 = x, x2 = x + 3, y = 1}
 
     term.setBackgroundColor(colors.black)
 end
 
 function StatsPage:drawTabs()
     term.setCursorPos(1, 3)
+    self.tabRegions = {}
 
-    for _, tab in ipairs(self.tabs) do
+    local x = 1
+    for i, tab in ipairs(self.tabs) do
         if tab == self.selectedTab then
             term.setBackgroundColor(colors.gray)
             term.setTextColor(colors.yellow)
@@ -94,9 +128,23 @@ function StatsPage:drawTabs()
             term.setTextColor(colors.lightGray)
         end
 
-        term.write(" " .. tab:upper() .. " ")
+        local tabText = " " .. tab:upper() .. " "
+        term.setCursorPos(x, 3)
+        term.write(tabText)
+
+        -- Store clickable region
+        self.tabRegions[i] = {
+            x1 = x,
+            x2 = x + #tabText - 1,
+            y = 3,
+            tab = tab
+        }
+
+        x = x + #tabText
+
         term.setBackgroundColor(colors.black)
         term.write(" ")
+        x = x + 1
     end
 end
 
@@ -107,6 +155,14 @@ function StatsPage:drawOverview()
     term.setCursorPos(1, y)
     term.setTextColor(colors.white)
     term.write("UPTIME:")
+
+    -- Show hovered uptime value
+    if self.hoveredUptimeIndex and self.uptimeData[self.hoveredUptimeIndex] then
+        term.write(" ")
+        term.setTextColor(colors.yellow)
+        term.write(string.format("%.1f%%", self.uptimeData[self.hoveredUptimeIndex]))
+    end
+
     y = y + 1
 
     self:drawUptimeGraph(1, y, self.width, 8)
@@ -139,13 +195,33 @@ function StatsPage:drawOverview()
         {"Storage Used", self:getStorageUsage() .. "%", colors.magenta}
     }
 
-    for _, metric in ipairs(metrics) do
-        term.setCursorPos(2, y)
-        term.setTextColor(colors.lightGray)
-        term.write(metric[1] .. ": ")
-        term.setTextColor(metric[3])
-        term.write(tostring(metric[2]))
-        y = y + 1
+    -- Split metrics into two columns with evenly split rows
+    local columnWidth = math.floor(self.width / 2)
+    local leftColumnItems = math.ceil(#metrics / 2)  -- Favor left column
+
+    -- Draw metrics in two columns
+    local maxRows = leftColumnItems
+    for row = 1, maxRows do
+        local leftIdx = row
+        local rightIdx = row + leftColumnItems
+
+        -- Left column
+        if metrics[leftIdx] then
+            term.setCursorPos(2, y + row - 1)
+            term.setTextColor(colors.lightGray)
+            term.write(metrics[leftIdx][1] .. ": ")
+            term.setTextColor(metrics[leftIdx][3])
+            term.write(tostring(metrics[leftIdx][2]))
+        end
+
+        -- Right column
+        if metrics[rightIdx] then
+            term.setCursorPos(columnWidth + 2, y + row - 1)
+            term.setTextColor(colors.lightGray)
+            term.write(metrics[rightIdx][1] .. ": ")
+            term.setTextColor(metrics[rightIdx][3])
+            term.write(tostring(metrics[rightIdx][2]))
+        end
     end
 end
 
@@ -155,7 +231,15 @@ function StatsPage:drawUptimeGraph(x, y, width, height)
     local graphHeight = height - 2
 
     -- Load uptime data
-    local uptimeData = self:loadUptimeData()
+    self.uptimeData = self:loadUptimeData()
+
+    -- Store graph region for hover detection
+    self.uptimeGraphRegion = {
+        x = x + 5,
+        y = y,
+        width = graphWidth,
+        height = graphHeight
+    }
 
     -- Draw graph border
     for row = 0, graphHeight do
@@ -172,28 +256,33 @@ function StatsPage:drawUptimeGraph(x, y, width, height)
     end
 
     -- Plot uptime data
-    if #uptimeData > 0 then
-        local dataPoints = math.min(#uptimeData, graphWidth)
-        local startIdx = math.max(1, #uptimeData - dataPoints + 1)
+    if #self.uptimeData > 0 then
+        local dataPoints = math.min(#self.uptimeData, graphWidth)
+        local startIdx = math.max(1, #self.uptimeData - dataPoints + 1)
 
+        -- Draw columns from left to right (oldest to newest)
+        -- But we want newest data on the RIGHT
         for i = 0, dataPoints - 1 do
             local dataIdx = startIdx + i
-            local uptime = uptimeData[dataIdx] or 0
-            local barHeight = math.floor(uptime * graphHeight / 100)
+            local uptime = self.uptimeData[dataIdx] or 0
+            local downtime = 100 - uptime
 
-            for h = 1, barHeight do
-                term.setCursorPos(x + 5 + i, y + graphHeight - h)
+            -- Calculate bar heights
+            local uptimeBarHeight = math.floor(uptime * graphHeight / 100)
+            local downtimeBarHeight = math.floor(downtime * graphHeight / 100)
 
-                if uptime >= 99 then
-                    term.setTextColor(colors.green)
-                    term.write("#")
-                elseif uptime >= 95 then
-                    term.setTextColor(colors.yellow)
-                    term.write("=")
-                else
-                    term.setTextColor(colors.red)
-                    term.write("-")
-                end
+            -- Draw from bottom up: uptime (green) from bottom
+            for h = 0, uptimeBarHeight - 1 do
+                term.setCursorPos(x + 5 + i, y + graphHeight - h - 1)
+                term.setTextColor(colors.green)
+                term.write("#")
+            end
+
+            -- Draw downtime (red) stacked on top
+            for h = 0, downtimeBarHeight - 1 do
+                term.setCursorPos(x + 5 + i, y + graphHeight - uptimeBarHeight - h - 1)
+                term.setTextColor(colors.red)
+                term.write("#")
             end
         end
     end
@@ -356,38 +445,198 @@ function StatsPage:drawPoolStats()
     term.write("THREAD POOL STATISTICS:")
     y = y + 2
 
-    local pools = self.context.scheduler:getPools()
+    -- Draw table header with white background and black text
+    term.setCursorPos(1, y)
+    term.setBackgroundColor(colors.white)
+    term.setTextColor(colors.black)
+    term.clearLine()
 
-    for poolName, pool in pairs(pools) do
-        term.setCursorPos(2, y)
+    term.setCursorPos(2, y)
+    term.write("POOL NAME")
+    term.setCursorPos(20, y)
+    term.write("WORKERS")
+    term.setCursorPos(32, y)
+    term.write("ACTIVE")
+    term.setCursorPos(43, y)
+    term.write("QUEUE")
+    y = y + 1
+
+    -- Draw pools as table rows with alternating colors
+    local pools = self.context.scheduler:getPools()
+    self.poolRegions = {}
+
+    local poolList = {}
+    for name, pool in pairs(pools) do
+        table.insert(poolList, {name = name, pool = pool})
+    end
+    table.sort(poolList, function(a, b) return a.name < b.name end)
+
+    for i, poolData in ipairs(poolList) do
+        local poolName = poolData.name
+        local pool = poolData.pool
+
+        -- Store clickable region
+        table.insert(self.poolRegions, {
+            x1 = 1,
+            x2 = self.width,
+            y = y,
+            poolName = poolName,
+            pool = pool
+        })
+
+        -- Alternating row colors
+        if i % 2 == 0 then
+            term.setBackgroundColor(colors.gray)
+        else
+            term.setBackgroundColor(colors.black)
+        end
+
+        term.setCursorPos(1, y)
+        term.clearLine()
 
         -- Pool name
+        term.setCursorPos(2, y)
         term.setTextColor(colors.cyan)
         term.write(poolName:upper())
 
-        -- Worker count
-        term.setCursorPos(15, y)
-        term.setTextColor(colors.lightGray)
-        term.write("Workers: ")
+        -- Workers
+        term.setCursorPos(20, y)
         term.setTextColor(colors.white)
         term.write(tostring(pool.size))
 
-        -- Active tasks
-        term.setCursorPos(30, y)
-        term.setTextColor(colors.lightGray)
-        term.write("Active: ")
+        -- Active
+        term.setCursorPos(32, y)
         term.setTextColor(colors.yellow)
-        term.write(tostring(pool.active))
+        term.write(tostring(pool.active or 0))
 
-        -- Queued tasks
-        term.setCursorPos(45, y)
-        term.setTextColor(colors.lightGray)
-        term.write("Queue: ")
+        -- Queue
+        term.setCursorPos(43, y)
         term.setTextColor(colors.orange)
         term.write(tostring(#pool.queue))
 
         y = y + 1
     end
+
+    -- Reset background color
+    term.setBackgroundColor(colors.black)
+
+    -- Instructions
+    y = y + 1
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.gray)
+    term.write("(Click on a pool to view details)")
+end
+
+function StatsPage:drawPoolModal()
+    local pool = self.selectedPool.pool
+    local poolName = self.selectedPool.poolName
+
+    -- Modal dimensions (centered)
+    local modalWidth = math.min(45, self.width - 4)
+    local modalHeight = 15
+    local modalX = math.floor((self.width - modalWidth) / 2)
+    local modalY = math.floor((self.height - modalHeight) / 2)
+
+    -- Draw shadow
+    for y = modalY + 1, modalY + modalHeight do
+        term.setCursorPos(modalX + 1, y)
+        term.setBackgroundColor(colors.gray)
+        term.write(string.rep(" ", modalWidth))
+    end
+
+    -- Draw modal background
+    for y = modalY, modalY + modalHeight - 1 do
+        term.setCursorPos(modalX, y)
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.white)
+        term.write(string.rep(" ", modalWidth))
+    end
+
+    -- Draw border
+    term.setCursorPos(modalX, modalY)
+    term.setBackgroundColor(colors.gray)
+    term.setTextColor(colors.white)
+    term.write(" " .. poolName:upper() .. " POOL DETAILS " .. string.rep(" ", modalWidth - #poolName - 15))
+
+    -- Draw close button (red square with white X) in top right
+    local closeX = modalX + modalWidth - 3
+    term.setCursorPos(closeX, modalY)
+    term.setBackgroundColor(colors.red)
+    term.setTextColor(colors.white)
+    term.write(" X ")
+
+    -- Store close button region for click detection
+    self.modalCloseBtn = {x1 = closeX, x2 = closeX + 2, y = modalY}
+
+    -- Pool stats
+    local y = modalY + 2
+    local contentX = modalX + 2
+
+    term.setCursorPos(contentX, y)
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.lightGray)
+    term.write("Pool Name:")
+    term.setCursorPos(contentX + 20, y)
+    term.setTextColor(colors.cyan)
+    term.write(poolName:upper())
+    y = y + 1
+
+    term.setCursorPos(contentX, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Worker Threads:")
+    term.setCursorPos(contentX + 20, y)
+    term.setTextColor(colors.white)
+    term.write(tostring(pool.size))
+    y = y + 1
+
+    term.setCursorPos(contentX, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Active Workers:")
+    term.setCursorPos(contentX + 20, y)
+    term.setTextColor(colors.yellow)
+    term.write(tostring(pool.active or 0))
+    y = y + 1
+
+    term.setCursorPos(contentX, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Queued Tasks:")
+    term.setCursorPos(contentX + 20, y)
+    term.setTextColor(colors.orange)
+    term.write(tostring(#pool.queue))
+    y = y + 2
+
+    -- Additional stats
+    term.setCursorPos(contentX, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Completed Tasks:")
+    term.setCursorPos(contentX + 20, y)
+    term.setTextColor(colors.green)
+    term.write(tostring(pool.completed or 0))
+    y = y + 1
+
+    term.setCursorPos(contentX, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Failed Tasks:")
+    term.setCursorPos(contentX + 20, y)
+    term.setTextColor(colors.red)
+    term.write(tostring(pool.failed or 0))
+    y = y + 1
+
+    term.setCursorPos(contentX, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Utilization:")
+    term.setCursorPos(contentX + 20, y)
+    local utilization = pool.size > 0 and math.floor((pool.active or 0) / pool.size * 100) or 0
+    term.setTextColor(colors.lime)
+    term.write(tostring(utilization) .. "%")
+    y = y + 2
+
+    -- Close instruction
+    term.setCursorPos(modalX + 2, modalY + modalHeight - 2)
+    term.setTextColor(colors.gray)
+    term.write("Press ESC or click outside to close")
+
+    term.setBackgroundColor(colors.black)
 end
 
 function StatsPage:drawFooter()
@@ -516,17 +765,125 @@ function StatsPage:getStorageUsage()
     return math.floor(100 * usedSlots / totalSlots)
 end
 
-function StatsPage:handleInput(event, key)
+function StatsPage:handleInput(event, param1, param2, param3)
     if event == "key" then
-        if key == keys.b then
-            -- Go back to console
-            self.context.router:navigate("console")
-        elseif key >= keys.one and key <= keys.five then
-            -- Switch tabs with number keys
+        local key = param1
+
+        -- Close modal on ESC
+        if key == keys.escape and self.showModal then
+            self.showModal = false
+            self.selectedPool = nil
+            self.needsFullRedraw = true
+            self:render()
+            return
+        end
+
+        -- Tab switching with number keys only
+        if key >= keys.one and key <= keys.five then
             local tabIndex = key - keys.one + 1
             if self.tabs[tabIndex] then
                 self.selectedTab = self.tabs[tabIndex]
+                self.needsFullRedraw = true
                 self:render()
+            end
+        end
+    elseif event == "mouse_click" then
+        -- param1 = button, param2 = x, param3 = y
+        self:handleClick(param2, param3)
+    elseif event == "mouse_move" or event == "mouse_drag" then
+        -- param1 = x, param2 = y
+        self:handleMouseMove(param1, param2)
+    end
+end
+
+function StatsPage:handleMouseMove(x, y)
+    -- Only track hover on overview tab
+    if self.selectedTab ~= "overview" then
+        return
+    end
+
+    -- Check if mouse is over uptime graph
+    if self.uptimeGraphRegion and self.uptimeGraphRegion.width > 0 then
+        local gx = self.uptimeGraphRegion.x
+        local gy = self.uptimeGraphRegion.y
+        local gw = self.uptimeGraphRegion.width
+        local gh = self.uptimeGraphRegion.height
+
+        if x >= gx and x < gx + gw and y >= gy and y < gy + gh then
+            -- Calculate which data point is being hovered
+            local columnIndex = x - gx + 1
+            local dataPoints = math.min(#self.uptimeData, gw)
+            local startIdx = math.max(1, #self.uptimeData - dataPoints + 1)
+            local hoveredIdx = startIdx + columnIndex - 1
+
+            if hoveredIdx ~= self.hoveredUptimeIndex and hoveredIdx <= #self.uptimeData then
+                self.hoveredUptimeIndex = hoveredIdx
+                self:render()
+            end
+        else
+            -- Mouse left graph area
+            if self.hoveredUptimeIndex then
+                self.hoveredUptimeIndex = nil
+                self:render()
+            end
+        end
+    end
+end
+
+function StatsPage:handleClick(x, y)
+    -- If modal is open, check for close button or outside click
+    if self.showModal then
+        -- Check close button click
+        if self.modalCloseBtn and y == self.modalCloseBtn.y and
+           x >= self.modalCloseBtn.x1 and x <= self.modalCloseBtn.x2 then
+            self.showModal = false
+            self.selectedPool = nil
+            self.needsFullRedraw = true
+            self:render()
+            return
+        end
+
+        local modalWidth = math.min(45, self.width - 4)
+        local modalHeight = 15
+        local modalX = math.floor((self.width - modalWidth) / 2)
+        local modalY = math.floor((self.height - modalHeight) / 2)
+
+        -- Click outside modal closes it
+        if x < modalX or x > modalX + modalWidth - 1 or y < modalY or y > modalY + modalHeight - 1 then
+            self.showModal = false
+            self.selectedPool = nil
+            self.needsFullRedraw = true
+            self:render()
+            return
+        end
+        -- Click inside modal does nothing (modal stays open)
+        return
+    end
+
+    -- Check back link
+    if y == self.backLink.y and x >= self.backLink.x1 and x <= self.backLink.x2 then
+        self.context.router:navigate("console")
+        return
+    end
+
+    -- Check tab clicks
+    for i, region in ipairs(self.tabRegions) do
+        if y == region.y and x >= region.x1 and x <= region.x2 then
+            self.selectedTab = region.tab
+            self.needsFullRedraw = true
+            self:render()
+            return
+        end
+    end
+
+    -- Check pool region clicks (only on pools tab)
+    if self.selectedTab == "pools" and self.poolRegions then
+        for _, region in ipairs(self.poolRegions) do
+            if y == region.y and x >= region.x1 and x <= region.x2 then
+                self.selectedPool = region
+                self.showModal = true
+                self:render()
+                return
             end
         end
     end

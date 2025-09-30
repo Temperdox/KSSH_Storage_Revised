@@ -7,7 +7,8 @@ function SettingsService:new(context)
     o.eventBus = context.eventBus
     o.logger = context.logger
     o.settings = context.settings
-    o.settingsFile = "/storage/cfg/settings.json"
+    o.diskManager = context.diskManager
+    o.settingsFilename = "settings.json"
 
     return o
 end
@@ -60,27 +61,52 @@ function SettingsService:applyChange(change)
 end
 
 function SettingsService:save()
-    local file = fs.open(self.settingsFile, "w")
-    if file then
-        file.write(textutils.serialiseJSON(self.settings))
-        file.close()
-        self.logger:debug("SettingsService", "Settings saved")
+    if self.diskManager then
+        local success, path = self.diskManager:writeFile("config", self.settingsFilename, textutils.serialiseJSON(self.settings))
+        if success then
+            self.logger:debug("SettingsService", "Settings saved to " .. path)
+        else
+            self.logger:error("SettingsService", "Failed to save settings: " .. tostring(path))
+        end
     else
-        self.logger:error("SettingsService", "Failed to save settings")
+        -- Fallback to local filesystem
+        local file = fs.open("/storage/cfg/settings.json", "w")
+        if file then
+            file.write(textutils.serialiseJSON(self.settings))
+            file.close()
+            self.logger:debug("SettingsService", "Settings saved")
+        else
+            self.logger:error("SettingsService", "Failed to save settings")
+        end
     end
 end
 
 function SettingsService:load()
-    if fs.exists(self.settingsFile) then
-        local file = fs.open(self.settingsFile, "r")
-        local content = file.readAll()
-        file.close()
+    if self.diskManager then
+        local content, path = self.diskManager:readFile("config", self.settingsFilename)
+        if content then
+            local ok, data = pcall(textutils.unserialiseJSON, content)
+            if ok and data then
+                self.settings = data
+                self.context.settings = data
+                self.logger:debug("SettingsService", "Settings loaded from " .. path)
+                return true
+            end
+        end
+    else
+        -- Fallback to local filesystem
+        local settingsFile = "/storage/cfg/settings.json"
+        if fs.exists(settingsFile) then
+            local file = fs.open(settingsFile, "r")
+            local content = file.readAll()
+            file.close()
 
-        local ok, data = pcall(textutils.unserialiseJSON, content)
-        if ok and data then
-            self.settings = data
-            self.context.settings = data
-            return true
+            local ok, data = pcall(textutils.unserialiseJSON, content)
+            if ok and data then
+                self.settings = data
+                self.context.settings = data
+                return true
+            end
         end
     end
     return false

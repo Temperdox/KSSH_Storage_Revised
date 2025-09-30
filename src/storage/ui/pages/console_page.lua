@@ -33,7 +33,72 @@ function ConsolePage:new(context)
     o.commandY = o.height - 1
     o.footerY = o.height
 
+    -- Navigation link positions (for click detection)
+    o.navLinks = {}
+
+    -- Logo bitmap for efficient rendering
+    o.logoBitmap = nil
+    o.logoX = 0
+    o.logoY = 0
+    o.logoWidth = 0
+    o.logoHeight = 0
+    o:buildLogoBitmap()
+
     return o
+end
+
+function ConsolePage:buildLogoBitmap()
+    -- Load logo graphic
+    local success, graphicModule = pcall(require, "ui.graphics.logo")
+    if not success or not graphicModule or not graphicModule.sergal then
+        return
+    end
+
+    local graphic = graphicModule.sergal
+    self.logoWidth = graphic.width
+    self.logoHeight = graphic.height
+
+    -- Calculate centered position
+    local consoleHeight = self.consoleBottom - self.consoleTop - 1
+    self.logoX = math.floor((self.width - self.logoWidth) / 2)
+    self.logoY = self.consoleTop + 1 + math.floor((consoleHeight - self.logoHeight) / 2)
+
+    -- Build 2D bitmap: true = logo pixel (purple), false = transparent
+    self.logoBitmap = {}
+    for row = 1, self.logoHeight do
+        self.logoBitmap[row] = {}
+        for col = 1, self.logoWidth do
+            self.logoBitmap[row][col] = false  -- Default transparent
+        end
+    end
+
+    -- Process graphic data into bitmap
+    local idx = 1
+    for row = 1, self.logoHeight do
+        for col = 1, self.logoWidth do
+            if idx <= #graphic.image then
+                local binaryStr = graphic.image[idx]
+                -- Check if any bit is set to 1 (indicating logo pixel)
+                local hasPixel = binaryStr:find("1") ~= nil
+                self.logoBitmap[row][col] = hasPixel
+                idx = idx + 1
+            end
+        end
+    end
+end
+
+function ConsolePage:isLogoPixel(x, y)
+    -- Check if position (x, y) is within logo area and should show logo
+    if not self.logoBitmap then return false end
+
+    local relX = x - self.logoX + 1
+    local relY = y - self.logoY + 1
+
+    if relX >= 1 and relX <= self.logoWidth and relY >= 1 and relY <= self.logoHeight then
+        return self.logoBitmap[relY] and self.logoBitmap[relY][relX] or false
+    end
+
+    return false
 end
 
 function ConsolePage:onEnter()
@@ -79,19 +144,31 @@ function ConsolePage:drawHeader()
     term.clearLine()
     term.setTextColor(colors.white)
 
-    -- Title
-    local title = " STORAGE CONSOLE "
-    term.setCursorPos(math.floor((self.width - #title) / 2), 1)
-    term.write(title)
+    -- Title on the left
+    term.setCursorPos(2, 1)
+    term.write("STORAGE CONSOLE")
 
-    -- Navigation links
-    term.setCursorPos(self.width - 20, 1)
-    term.setTextColor(colors.yellow)
-    term.write("[S]tats ")
-    term.setTextColor(colors.lime)
-    term.write("[T]ests ")
+    -- Navigation links on the right (right-aligned with more spacing)
+    self.navLinks = {}
+
+    -- Calculate positions from right to left
+    local x = self.width - 8
+    term.setCursorPos(x, 1)
     term.setTextColor(colors.orange)
-    term.write("[X]ettings")
+    term.write("Settings")
+    self.navLinks.settings = {x1 = x, x2 = x + 7, y = 1, page = "settings"}
+
+    x = x - 8
+    term.setCursorPos(x, 1)
+    term.setTextColor(colors.lime)
+    term.write("Tests")
+    self.navLinks.tests = {x1 = x, x2 = x + 4, y = 1, page = "tests"}
+
+    x = x - 8
+    term.setCursorPos(x, 1)
+    term.setTextColor(colors.yellow)
+    term.write("Stats")
+    self.navLinks.stats = {x1 = x, x2 = x + 4, y = 1, page = "stats"}
 
     term.setBackgroundColor(colors.black)
 end
@@ -182,23 +259,32 @@ function ConsolePage:drawLogConsole()
         visibleEnd = math.min(self.scrollOffset + consoleHeight, #filteredLogs)
     end
 
-    -- Draw logs
+    -- Clear all lines and draw logo + text together
+    for clearY = self.consoleTop + 1, self.consoleBottom do
+        term.setCursorPos(1, clearY)
+
+        -- Draw entire line with logo background where applicable
+        for x = 1, self.width do
+            if self:isLogoPixel(x, clearY) then
+                term.setBackgroundColor(colors.purple)
+                term.setTextColor(colors.purple)
+                term.write(" ")
+            else
+                term.setBackgroundColor(colors.black)
+                term.setTextColor(colors.black)
+                term.write(" ")
+            end
+        end
+    end
+
+    -- Draw logs on top with intelligent background handling
     local y = self.consoleTop + 1
     for i = visibleStart, visibleEnd do
         local log = filteredLogs[i]
         if log then
-            term.setCursorPos(1, y)
-            term.clearLine()
-            self:drawLogLine(log)
+            self:drawLogLine(log, y)
             y = y + 1
         end
-    end
-
-    -- Clear remaining lines
-    while y <= self.consoleBottom do
-        term.setCursorPos(1, y)
-        term.clearLine()
-        y = y + 1
     end
 
     -- Draw bottom border
@@ -207,27 +293,55 @@ function ConsolePage:drawLogConsole()
     term.clearLine()
     term.write(string.rep("-", self.width))
 
-    -- Scroll indicators
-    if visibleStart > 1 then
-        term.setCursorPos(self.width - 2, self.consoleTop + 1)
-        term.setTextColor(colors.yellow)
-        term.write("^^")
+    -- Draw scroll bar on the right edge
+    if #filteredLogs > consoleHeight then
+        local scrollBarHeight = consoleHeight
+        local scrollBarPos = math.floor((visibleStart - 1) / (#filteredLogs - consoleHeight) * (scrollBarHeight - 1))
+
+        for i = 0, scrollBarHeight - 1 do
+            term.setCursorPos(self.width, self.consoleTop + 1 + i)
+            if i == scrollBarPos then
+                term.setBackgroundColor(colors.black)
+                term.setTextColor(colors.white)
+                term.write("\138")  -- Slim scroll indicator
+            else
+                term.setBackgroundColor(colors.lightGray)
+                term.setTextColor(colors.black)
+                term.write("\149")  -- Track character
+            end
+        end
+        term.setBackgroundColor(colors.black)
     end
 
-    if visibleEnd < #filteredLogs then
-        term.setCursorPos(self.width - 2, self.consoleBottom)
-        term.setTextColor(colors.yellow)
-        term.write("vv")
+    -- Scroll to bottom button (when not at bottom)
+    if not self.autoScroll and visibleEnd < #filteredLogs then
+        local btnY = self.consoleBottom - 1
+        local btnText = " \25 Bottom "
+        local btnX = math.floor((self.width - #btnText) / 2)
+
+        -- Draw button character by character to respect logo background
+        for i = 1, #btnText do
+            local x = btnX + i - 1
+            local char = btnText:sub(i, i)
+
+            term.setCursorPos(x, btnY)
+
+            -- Always use orange background for button, overriding logo
+            term.setBackgroundColor(colors.orange)
+            term.setTextColor(colors.white)
+            term.write(char)
+        end
+
+        -- Store button position for click detection
+        self.scrollToBottomBtn = {x1 = btnX, x2 = btnX + #btnText - 1, y = btnY}
+        term.setBackgroundColor(colors.black)
+    else
+        self.scrollToBottomBtn = nil
     end
 end
 
-function ConsolePage:drawLogLine(log)
-    -- Time
-    term.setTextColor(colors.gray)
-    term.write(log.time or "00:00:00")
-    term.write(" ")
-
-    -- Level/Type
+function ConsolePage:drawLogLine(log, y)
+    -- Build the log line string with color codes
     local levelColors = {
         trace = colors.gray,
         debug = colors.lightGray,
@@ -237,29 +351,56 @@ function ConsolePage:drawLogLine(log)
         print = colors.cyan
     }
 
-    term.setTextColor(levelColors[log.level] or colors.white)
+    -- Build segments with their colors
+    local segments = {}
+
+    -- Time
+    table.insert(segments, {text = log.time or "00:00:00", color = colors.gray})
+    table.insert(segments, {text = " ", color = colors.gray})
+
+    -- Level/Type
     local levelStr = (log.level or "INFO"):upper()
     if #levelStr > 5 then levelStr = levelStr:sub(1, 5) end
-    term.write("[" .. levelStr .. "]")
-    term.write(" ")
+    table.insert(segments, {text = "[" .. levelStr .. "]", color = levelColors[log.level] or colors.white})
+    table.insert(segments, {text = " ", color = colors.white})
 
     -- Source
-    term.setTextColor(colors.cyan)
     local source = log.source or "System"
     if #source > 12 then
         source = source:sub(1, 10) .. ".."
     end
-    term.write(source)
-    term.write(" ")
+    table.insert(segments, {text = source, color = colors.cyan})
+    table.insert(segments, {text = " ", color = colors.white})
 
     -- Message
-    term.setTextColor(colors.white)
     local message = log.message or ""
     local remainingWidth = self.width - 30
     if #message > remainingWidth then
         message = message:sub(1, remainingWidth - 3) .. "..."
     end
-    term.write(message)
+    table.insert(segments, {text = message, color = colors.white})
+
+    -- Draw character by character with smart background handling
+    local x = 1
+    term.setCursorPos(x, y)
+
+    for _, segment in ipairs(segments) do
+        term.setTextColor(segment.color)
+
+        for i = 1, #segment.text do
+            local char = segment.text:sub(i, i)
+
+            -- Check if this position has a logo pixel
+            if not self:isLogoPixel(x, y) then
+                -- No logo here, use black background
+                term.setBackgroundColor(colors.black)
+            end
+            -- If logo pixel, keep the purple background already drawn
+
+            term.write(char)
+            x = x + 1
+        end
+    end
 end
 
 function ConsolePage:drawCommandLine()
@@ -352,17 +493,8 @@ function ConsolePage:handleInput(event, param1, param2, param3)
     if event == "key" then
         local key = param1
 
-        -- FIXED: Removed keys.isPressed checks that don't exist in ComputerCraft
-        if key == keys.s then
-            -- Switch to stats page
-            self.context.router:navigate("stats")
-        elseif key == keys.t then
-            -- Switch to tests page
-            self.context.router:navigate("tests")
-        elseif key == keys.x then
-            -- Switch to settings page
-            self.context.router:navigate("settings")
-        elseif key == keys.f1 then
+        -- Navigation removed - use clickable links instead to avoid conflicts with command input
+        if key == keys.f1 then
             self:showHelp()
         elseif key == keys.up then
             if #self.currentCommand == 0 then
@@ -398,6 +530,27 @@ function ConsolePage:handleInput(event, param1, param2, param3)
         self.currentCommand = self.currentCommand .. param1
     elseif event == "mouse_scroll" then
         self:scroll(param1 * 3)
+    elseif event == "mouse_click" then
+        self:handleClick(param2, param3)
+    end
+end
+
+function ConsolePage:handleClick(x, y)
+    -- Check scroll to bottom button
+    if self.scrollToBottomBtn then
+        if y == self.scrollToBottomBtn.y and x >= self.scrollToBottomBtn.x1 and x <= self.scrollToBottomBtn.x2 then
+            self.autoScroll = true
+            self.scrollOffset = 0
+            return
+        end
+    end
+
+    -- Check navigation links
+    for _, link in pairs(self.navLinks) do
+        if y == link.y and x >= link.x1 and x <= link.x2 then
+            self.context.router:navigate(link.page)
+            return
+        end
     end
 end
 
@@ -441,8 +594,32 @@ function ConsolePage:navigateHistory(direction)
 end
 
 function ConsolePage:scroll(amount)
-    self.autoScroll = false
-    self.scrollOffset = math.max(0, self.scrollOffset + amount)
+    -- Get total log count
+    local logs = {}
+    for _, entry in ipairs(self.printBuffer) do
+        table.insert(logs, entry)
+    end
+    if self.logger and self.logger.ringBuffer then
+        for _, entry in ipairs(self.logger.ringBuffer) do
+            table.insert(logs, entry)
+        end
+    end
+    local filteredLogs = self:filterLogs(logs)
+    local consoleHeight = self.consoleBottom - self.consoleTop - 1
+
+    -- Disable auto-scroll when scrolling up
+    if amount < 0 then
+        self.autoScroll = false
+    end
+
+    -- Update scroll offset
+    local maxScroll = math.max(0, #filteredLogs - consoleHeight)
+    self.scrollOffset = math.max(0, math.min(maxScroll, self.scrollOffset + amount))
+
+    -- Re-enable auto-scroll if we've scrolled to the bottom
+    if self.scrollOffset >= maxScroll then
+        self.autoScroll = true
+    end
 end
 
 function ConsolePage:autocomplete()
