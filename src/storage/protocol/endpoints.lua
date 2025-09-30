@@ -284,11 +284,14 @@ function Endpoints:register(name, config)
     self.endpoints[name] = config
 end
 
+-- Fixed: Use the metatable __index correctly
 function Endpoints:__index(key)
-    if self.endpoints[key] then
+    -- First check if it's an endpoint
+    if rawget(self, "endpoints") and self.endpoints[key] then
         return self.endpoints[key]
     end
-    return Endpoints[key]
+    -- Otherwise return the class method
+    return rawget(Endpoints, key)
 end
 
 return Endpoints

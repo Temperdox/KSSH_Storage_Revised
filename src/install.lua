@@ -6,7 +6,7 @@ local VERSION       = "1.0.0"
 
 -- Ignore patterns
 local IGNORE_PATTERNS = {
-    "^%.git", "^%.gitignore$", "README%.md$", "%.backup$", "install%.lua$", "^test", "^docs",
+    "^%.git", "^%.gitignore$", "README%.md$", "%.backup$", "install%.lua$", "^docs",
 }
 
 -- Color scheme
