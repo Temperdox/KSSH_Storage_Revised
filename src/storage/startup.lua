@@ -1,4 +1,39 @@
+-- ============================================================================
+-- PROPER STARTUP WITH PRINT OVERRIDE AND FULL TERMINAL UI
+-- ============================================================================
+
+-- /storage/startup.lua
+-- Full startup with print redirection to UI console
+
 local function startup()
+    -- Save original print function
+    local originalPrint = print
+    local printBuffer = {}
+    local maxPrintBuffer = 100
+
+    -- Override global print to capture output
+    function print(...)
+        local args = {...}
+        local str = ""
+        for i, v in ipairs(args) do
+            str = str .. tostring(v)
+            if i < #args then str = str .. "\t" end
+        end
+
+        -- Add to buffer
+        table.insert(printBuffer, {
+            time = os.date("%H:%M:%S"),
+            text = str
+        })
+
+        -- Trim buffer
+        while #printBuffer > maxPrintBuffer do
+            table.remove(printBuffer, 1)
+        end
+
+        -- DO NOT print to actual console - it will break the UI
+    end
+
     -- System paths
     local BASE_PATH = "/storage"
     package.path = package.path .. ";" .. BASE_PATH .. "/?.lua"
@@ -11,27 +46,13 @@ local function startup()
     local Logger = require("core.logger")
     local TimeWheel = require("core.timewheel")
 
-    -- Load services
-    local Bootstrap = require("services.bootstrap")
-    local StorageService = require("services.storage_service")
-    local MonitorService = require("services.monitor_service")
-    local ApiService = require("services.api_service")
-    local StatsService = require("services.stats_service")
-    local TestsService = require("services.tests_service")
-    local SettingsService = require("services.settings_service")
-    local SoundService = require("services.sound_service")
-    local EventsBridge = require("services.events_bridge")
-
-    -- Initialize core systems
-    print("[STARTUP] CC:Storage System Starting...")
-
-    -- Create directory structure
+    -- Create directories
     fsx.ensureDir(BASE_PATH .. "/cfg")
     fsx.ensureDir(BASE_PATH .. "/cfg/themes")
     fsx.ensureDir(BASE_PATH .. "/data")
     fsx.ensureDir(BASE_PATH .. "/logs")
 
-    -- Load or create settings
+    -- Load settings
     local settingsPath = BASE_PATH .. "/cfg/settings.json"
     local settings = fsx.readJson(settingsPath) or {
         theme = "dark",
@@ -54,13 +75,14 @@ local function startup()
     }
     fsx.writeJson(settingsPath, settings)
 
-    -- Initialize event bus
+    -- Initialize core systems
     local eventBus = EventBus:new()
 
-    -- Initialize logger
+    -- Create logger that uses the print buffer
     local logger = Logger:new(eventBus, settings.logLevel)
+    logger.printBuffer = printBuffer  -- Share the print buffer
 
-    -- Initialize scheduler with named pools
+    -- Initialize scheduler
     local scheduler = Scheduler:new(eventBus)
     scheduler:createPool("io", settings.pools.io)
     scheduler:createPool("index", settings.pools.index)
@@ -71,13 +93,26 @@ local function startup()
     scheduler:createPool("tests", 2)
     scheduler:createPool("sound", 1)
 
-    -- Bootstrap storage discovery
+    -- Load services
+    local Bootstrap = require("services.bootstrap")
+    local StorageService = require("services.storage_service")
+    local MonitorService = require("services.monitor_service")
+    local ApiService = require("services.api_service")
+    local StatsService = require("services.stats_service")
+    local TestsService = require("services.tests_service")
+    local SettingsService = require("services.settings_service")
+    local SoundService = require("services.sound_service")
+    local EventsBridge = require("services.events_bridge")
+
+    -- Bootstrap storage
     logger:info("Bootstrap", "Discovering storage inventories...")
     local bootstrap = Bootstrap:new(eventBus, logger)
     local storageMap, bufferInventory = bootstrap:discover()
 
     if not bufferInventory then
-        error("[ERROR] No suitable buffer inventory found!")
+        -- Use original print for critical errors before UI loads
+        originalPrint("[ERROR] No suitable buffer inventory found!")
+        return
     end
 
     logger:info("Bootstrap", string.format(
@@ -85,7 +120,7 @@ local function startup()
             #storageMap, bufferInventory.name
     ))
 
-    -- Initialize time wheel for scheduled tasks
+    -- Initialize time wheel
     local timeWheel = TimeWheel:new(eventBus)
 
     -- Create service context
@@ -99,7 +134,8 @@ local function startup()
         timeWheel = timeWheel,
         basePath = BASE_PATH,
         running = true,
-        startTime = os.epoch("utc")
+        startTime = os.epoch("utc"),
+        printBuffer = printBuffer  -- Pass print buffer to context
     }
 
     -- Initialize services
@@ -114,125 +150,69 @@ local function startup()
         sound = SoundService:new(context)
     }
 
-    -- Start all services (non-blocking initialization)
-    logger:info("System", "Starting services...")
-
+    -- Start services
     for name, service in pairs(context.services) do
         if service.start then
             service:start()
             logger:info("System", string.format("Service '%s' initialized", name))
-            eventBus:publish("system.serviceStarted", {service = name})
         end
     end
 
-    logger:info("System", "[OK] All services initialized!")
+    -- Initialize Terminal UI Router and Pages
+    local Router = require("ui.router")
+    local router = Router:new(context)
+    context.router = router
+
+    -- Load command factory
+    local CommandFactory = require("factories.command_factory")
+    local commandFactory = CommandFactory:new(context)
+    context.commandFactory = commandFactory
+
+    -- Register pages
+    local ConsolePage = require("ui.pages.console_page")
+    local StatsPage = require("ui.pages.stats_page")
+    local TestsPage = require("ui.pages.tests_page")
+    local SettingsPage = require("ui.pages.settings_page")
+
+    router:register("console", ConsolePage:new(context))
+    router:register("stats", StatsPage:new(context))
+    router:register("tests", TestsPage:new(context))
+    router:register("settings", SettingsPage:new(context))
+
+    -- Navigate to console page
+    router:navigate("console")
+
+    -- Load commands
+    local CommandLoader = require("commands.init")
+    CommandLoader.loadAll(commandFactory, context)
+
+    logger:info("System", "All services initialized!")
     eventBus:publish("system.ready", {
-        timestamp = os.epoch("utc"),
-        services = context.services
+        timestamp = os.epoch("utc")
     })
 
-    -- Start time wheel
-    timeWheel:start()
-
     -- ========================================================================
-    -- PARALLEL PROCESS EXECUTION
+    -- PARALLEL PROCESSES
     -- ========================================================================
 
     local processes = {}
 
-    -- Process 1: Storage Service Handler
+    -- Process 1: Terminal UI and Input Handler
     table.insert(processes, function()
-        logger:debug("Process", "Storage handler starting...")
-        while context.running do
-            if context.services.storage and context.services.storage.monitorInput then
-                context.services.storage:monitorInput()
-            end
-            os.sleep(0.1)
-        end
-    end)
-
-    -- Process 2: Storage Buffer Processor
-    table.insert(processes, function()
-        logger:debug("Process", "Buffer processor starting...")
-        while context.running do
-            if context.services.storage and context.services.storage.processBuffer then
-                context.services.storage:processBuffer()
-            end
-            os.sleep(0.5)
-        end
-    end)
-
-    -- Process 3: Monitor Service
-    if context.services.monitor then
-        table.insert(processes, function()
-            logger:debug("Process", "Monitor service starting...")
-            context.services.monitor:run()
-        end)
-    end
-
-    -- Process 4: API Service
-    if context.services.api then
-        table.insert(processes, function()
-            logger:debug("Process", "API service starting...")
-            context.services.api:run()
-        end)
-    end
-
-    -- Process 5: Event Bridge Processor
-    table.insert(processes, function()
-        logger:debug("Process", "Event bridge starting...")
-        while context.running do
-            context.eventBus:processQueue()
-            os.sleep(0.05)
-        end
-    end)
-
-    -- Process 6: Stats Service
-    if context.services.stats then
-        table.insert(processes, function()
-            logger:debug("Process", "Stats service starting...")
-            while context.running do
-                context.services.stats:tick()
-                os.sleep(60)  -- Tick every minute
-            end
-        end)
-    end
-
-    -- Process 7: Scheduler Worker Manager
-    table.insert(processes, function()
-        logger:debug("Process", "Scheduler workers starting...")
-        scheduler:runWorkers()
-    end)
-
-    -- Process 8: Terminal UI (if available)
-    local Router = require("ui.router")
-    local router = Router:new(context)
-
-    -- Register pages
-    router:register("console", require("ui.pages.console_page"):new(context))
-    router:register("stats", require("ui.pages.stats_page"):new(context))
-    router:register("tests", require("ui.pages.tests_page"):new(context))
-    router:register("settings", require("ui.pages.settings_page"):new(context))
-
-    -- Navigate to console
-    router:navigate("console")
-
-    table.insert(processes, function()
-        logger:debug("Process", "Terminal UI starting...")
         while context.running do
             local event = {os.pullEvent()}
 
-            -- Handle termination
             if event[1] == "terminate" then
                 context.running = false
-                logger:info("System", "Shutdown signal received")
                 break
             end
 
             -- Route to current page
-            router:handleInput(table.unpack(event))
+            if router:getCurrentPage() and router:getCurrentPage().handleInput then
+                router:getCurrentPage():handleInput(table.unpack(event))
+            end
 
-            -- Publish raw event
+            -- Publish event
             eventBus:publish("raw." .. event[1], {
                 type = event[1],
                 params = {table.unpack(event, 2)}
@@ -240,45 +220,93 @@ local function startup()
         end
     end)
 
-    -- Process 9: Time Wheel Ticker
+    -- Process 2: UI Render Loop
     table.insert(processes, function()
-        logger:debug("Process", "Time wheel starting...")
+        while context.running do
+            if router:getCurrentPage() and router:getCurrentPage().render then
+                router:getCurrentPage():render()
+            end
+            os.sleep(0.1)  -- 10 FPS
+        end
+    end)
+
+    -- Process 3: Storage Input Monitor
+    table.insert(processes, function()
+        while context.running do
+            if context.services.storage and context.services.storage.monitorInput then
+                context.services.storage:monitorInput()
+            end
+            os.sleep(0.5)
+        end
+    end)
+
+    -- Process 4: Storage Buffer Processor
+    table.insert(processes, function()
+        while context.running do
+            if context.services.storage and context.services.storage.processBuffer then
+                context.services.storage:processBuffer()
+            end
+            os.sleep(1)
+        end
+    end)
+
+    -- Process 5: Monitor Service (if available)
+    if context.services.monitor and peripheral.find("monitor") then
+        table.insert(processes, function()
+            context.services.monitor:run()
+        end)
+    end
+
+    -- Process 6: API Service
+    if context.services.api and context.services.api.modem then
+        table.insert(processes, function()
+            context.services.api:run()
+        end)
+    end
+
+    -- Process 7: Scheduler Workers
+    table.insert(processes, function()
+        scheduler:runWorkers()
+    end)
+
+    -- Process 8: Event Queue Processor
+    table.insert(processes, function()
+        while context.running do
+            eventBus:processQueue()
+            os.sleep(0.05)
+        end
+    end)
+
+    -- Process 9: Time Wheel
+    table.insert(processes, function()
         timeWheel:runTicker()
     end)
 
-    -- Process 10: Command Handler (if commands registered)
-    local CommandFactory = require("factories.command_factory")
-    local commandFactory = CommandFactory:new(context)
-
-    -- Load commands
-    local CommandLoader = require("commands.init")
-    CommandLoader.loadAll(commandFactory, context)
-
-    context.commandFactory = commandFactory
+    -- Process 10: Stats Ticker
+    table.insert(processes, function()
+        while context.running do
+            if context.services.stats then
+                context.services.stats:tick()
+            end
+            os.sleep(60)
+        end
+    end)
 
     -- ========================================================================
     -- RUN ALL PROCESSES IN PARALLEL
     -- ========================================================================
 
-    logger:info("System", "Starting parallel processes...")
-
-    -- Run all processes in parallel
     parallel.waitForAny(table.unpack(processes))
 
-    -- Cleanup on shutdown
-    logger:info("System", "Shutting down...")
-
-    -- Stop all services
+    -- Cleanup
     for name, service in pairs(context.services) do
         if service.stop then
             service:stop()
-            logger:debug("System", string.format("Service '%s' stopped", name))
         end
     end
 
-    -- Flush logs
-    logger:flush()
-
+    -- Restore original print
+    _G.print = originalPrint
     print("[SHUTDOWN] Storage system stopped")
 end
 

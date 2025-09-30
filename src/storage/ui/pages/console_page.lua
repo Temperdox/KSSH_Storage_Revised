@@ -1,3 +1,10 @@
+-- ============================================================================
+-- FIXED CONSOLE PAGE THAT USES PRINT BUFFER
+-- ============================================================================
+
+-- /storage/ui/pages/console_page.lua
+-- Terminal UI console page that displays captured print output
+
 local ConsolePage = {}
 ConsolePage.__index = ConsolePage
 
@@ -6,10 +13,9 @@ function ConsolePage:new(context)
     o.context = context
     o.eventBus = context.eventBus
     o.logger = context.logger
+    o.printBuffer = context.printBuffer or {}
 
     -- UI state
-    o.logs = {}
-    o.maxLogs = 50
     o.scrollOffset = 0
     o.autoScroll = true
     o.searchQuery = ""
@@ -26,28 +32,34 @@ function ConsolePage:new(context)
     -- Terminal dimensions
     o.width, o.height = term.getSize()
 
+    -- Layout
+    o.headerHeight = 1
+    o.filterHeight = 2
+    o.consoleTop = 4
+    o.consoleBottom = o.height - 2
+    o.commandY = o.height - 1
+    o.footerY = o.height
+
     return o
 end
 
 function ConsolePage:onEnter()
-    -- Subscribe to events
+    -- Subscribe to log events
     self.eventBus:subscribe("log%..*", function(event, data)
         self:onNewLog(event, data)
     end)
 
-    -- Load recent logs
-    self:loadRecentLogs()
-
-    -- Start render loop
-    self:render()
+    -- Clear screen and set up UI
+    term.setBackgroundColor(colors.black)
+    term.clear()
 end
 
 function ConsolePage:onLeave()
-    -- Cleanup
+    -- Cleanup if needed
 end
 
 function ConsolePage:render()
-    term.clear()
+    -- Don't clear entire screen, just update regions
 
     -- Draw header
     self:drawHeader()
@@ -63,6 +75,9 @@ function ConsolePage:render()
 
     -- Draw footer
     self:drawFooter()
+
+    -- Reset cursor to command line
+    term.setCursorPos(3, self.commandY)
 end
 
 function ConsolePage:drawHeader()
@@ -89,6 +104,11 @@ function ConsolePage:drawHeader()
 end
 
 function ConsolePage:drawFilters()
+    term.setCursorPos(1, 2)
+    term.clearLine()
+    term.setCursorPos(1, 3)
+    term.clearLine()
+
     term.setCursorPos(1, 3)
 
     -- Search bar
@@ -107,79 +127,102 @@ function ConsolePage:drawFilters()
 
     term.setBackgroundColor(colors.black)
 
-    -- Log type dropdown
+    -- Log type filter
     term.setCursorPos(30, 3)
     term.setTextColor(colors.lightGray)
     term.write("Type: ")
     term.setTextColor(colors.yellow)
     term.write("[" .. self.selectedLogType .. "]")
 
-    -- Event type dropdown
-    term.setCursorPos(45, 3)
-    term.setTextColor(colors.lightGray)
-    term.write("Event: ")
-    term.setTextColor(colors.cyan)
-    term.write("[" .. self.selectedEventType .. "]")
+    -- Event type filter
+    if self.width > 60 then
+        term.setCursorPos(45, 3)
+        term.setTextColor(colors.lightGray)
+        term.write("Event: ")
+        term.setTextColor(colors.cyan)
+        term.write("[" .. self.selectedEventType .. "]")
+    end
 end
 
 function ConsolePage:drawLogConsole()
-    local startY = 5
-    local endY = self.height - 3
-    local consoleHeight = endY - startY + 1
-
-    -- Border
-    term.setCursorPos(1, startY - 1)
+    -- Draw border
+    term.setCursorPos(1, self.consoleTop)
     term.setTextColor(colors.gray)
+    term.clearLine()
     term.write(string.rep("-", self.width))
 
-    term.setCursorPos(1, endY + 1)
-    term.write(string.rep("-", self.width))
+    -- Get logs from print buffer and logger
+    local logs = {}
+
+    -- Add print buffer entries
+    for _, entry in ipairs(self.printBuffer) do
+        table.insert(logs, {
+            time = entry.time,
+            level = "print",
+            source = "System",
+            message = entry.text
+        })
+    end
+
+    -- Add logger entries
+    if self.logger and self.logger.ringBuffer then
+        for _, entry in ipairs(self.logger.ringBuffer) do
+            table.insert(logs, entry)
+        end
+    end
 
     -- Filter logs
-    local filteredLogs = self:filterLogs()
+    local filteredLogs = self:filterLogs(logs)
 
     -- Calculate visible range
+    local consoleHeight = self.consoleBottom - self.consoleTop - 1
     local visibleStart = 1
     local visibleEnd = math.min(#filteredLogs, consoleHeight)
 
-    if not self.autoScroll then
-        visibleStart = self.scrollOffset + 1
-        visibleEnd = math.min(self.scrollOffset + consoleHeight, #filteredLogs)
-    else
-        -- Show most recent at bottom
+    if self.autoScroll then
         if #filteredLogs > consoleHeight then
             visibleStart = #filteredLogs - consoleHeight + 1
             visibleEnd = #filteredLogs
         end
+    else
+        visibleStart = self.scrollOffset + 1
+        visibleEnd = math.min(self.scrollOffset + consoleHeight, #filteredLogs)
     end
 
-    -- Draw logs (newest at bottom)
-    local y = startY
+    -- Draw logs
+    local y = self.consoleTop + 1
     for i = visibleStart, visibleEnd do
         local log = filteredLogs[i]
         if log then
             term.setCursorPos(1, y)
+            term.clearLine()
             self:drawLogLine(log)
             y = y + 1
         end
     end
 
     -- Clear remaining lines
-    while y <= endY do
+    while y <= self.consoleBottom do
         term.setCursorPos(1, y)
         term.clearLine()
         y = y + 1
     end
 
+    -- Draw bottom border
+    term.setCursorPos(1, self.consoleBottom + 1)
+    term.setTextColor(colors.gray)
+    term.clearLine()
+    term.write(string.rep("-", self.width))
+
     -- Scroll indicators
     if visibleStart > 1 then
-        term.setCursorPos(self.width - 2, startY)
+        term.setCursorPos(self.width - 2, self.consoleTop + 1)
         term.setTextColor(colors.yellow)
         term.write("^^")
     end
 
     if visibleEnd < #filteredLogs then
-        term.setCursorPos(self.width - 2, endY)
+        term.setCursorPos(self.width - 2, self.consoleBottom)
         term.setTextColor(colors.yellow)
         term.write("vv")
     end
@@ -188,7 +231,7 @@ end
 function ConsolePage:drawLogLine(log)
     -- Time
     term.setTextColor(colors.gray)
-    term.write(log.time or os.date("%H:%M:%S"))
+    term.write(log.time or "00:00:00")
     term.write(" ")
 
     -- Level/Type
@@ -197,11 +240,14 @@ function ConsolePage:drawLogLine(log)
         debug = colors.lightGray,
         info = colors.white,
         warn = colors.yellow,
-        error = colors.red
+        error = colors.red,
+        print = colors.cyan
     }
 
     term.setTextColor(levelColors[log.level] or colors.white)
-    term.write("[" .. (log.level or "INFO"):upper() .. "]")
+    local levelStr = (log.level or "INFO"):upper()
+    if #levelStr > 5 then levelStr = levelStr:sub(1, 5) end
+    term.write("[" .. levelStr .. "]")
     term.write(" ")
 
     -- Source
@@ -216,24 +262,23 @@ function ConsolePage:drawLogLine(log)
     -- Message
     term.setTextColor(colors.white)
     local message = log.message or ""
-    local maxMsgLen = self.width - 30
-    if #message > maxMsgLen then
-        message = message:sub(1, maxMsgLen - 3) .. "..."
+    local remainingWidth = self.width - 30
+    if #message > remainingWidth then
+        message = message:sub(1, remainingWidth - 3) .. "..."
     end
     term.write(message)
 end
 
 function ConsolePage:drawCommandLine()
-    local cmdY = self.height - 1
-
-    term.setCursorPos(1, cmdY)
+    term.setCursorPos(1, self.commandY)
+    term.clearLine()
     term.setTextColor(colors.lime)
     term.write("> ")
 
     term.setTextColor(colors.white)
-    term.setBackgroundColor(colors.gray)
+    term.setBackgroundColor(colors.black)
 
-    -- Command input with cursor
+    -- Command input
     local cmdDisplay = self.currentCommand
     local maxCmdLen = self.width - 3
 
@@ -243,33 +288,30 @@ function ConsolePage:drawCommandLine()
 
     term.write(cmdDisplay)
 
-    -- Fill rest of line
-    local remaining = self.width - 2 - #cmdDisplay
-    if remaining > 0 then
-        term.write(string.rep(" ", remaining))
-    end
-
-    term.setBackgroundColor(colors.black)
+    -- Show cursor
+    term.setCursorBlink(true)
 end
 
 function ConsolePage:drawFooter()
-    term.setCursorPos(1, self.height)
+    term.setCursorPos(1, self.footerY)
+    term.clearLine()
     term.setTextColor(colors.gray)
 
     -- Status info
+    local logCount = #self.printBuffer + (self.logger and #self.logger.ringBuffer or 0)
     local status = string.format(
-            "Logs: %d | Scroll: %s | Press F1 for help",
-            #self.logs,
+            "Logs: %d | Scroll: %s | F1: Help",
+            logCount,
             self.autoScroll and "AUTO" or "MANUAL"
     )
 
     term.write(status)
 end
 
-function ConsolePage:filterLogs()
+function ConsolePage:filterLogs(logs)
     local filtered = {}
 
-    for _, log in ipairs(self.logs) do
+    for _, log in ipairs(logs) do
         local includeLog = true
 
         -- Filter by log type
@@ -277,13 +319,8 @@ function ConsolePage:filterLogs()
             includeLog = false
         end
 
-        -- Filter by event type
-        if self.selectedEventType ~= "all" and log.eventType ~= self.selectedEventType then
-            includeLog = false
-        end
-
         -- Filter by search query
-        if self.searchQuery ~= "" then
+        if self.searchQuery ~= "" and includeLog then
             local searchLower = self.searchQuery:lower()
             local messageMatch = (log.message or ""):lower():find(searchLower)
             local sourceMatch = (log.source or ""):lower():find(searchLower)
@@ -302,23 +339,10 @@ function ConsolePage:filterLogs()
 end
 
 function ConsolePage:onNewLog(event, data)
-    -- Add to logs
-    table.insert(self.logs, data)
-
-    -- Trim to max size
-    while #self.logs > self.maxLogs * 2 do
-        table.remove(self.logs, 1)
-    end
-
     -- Track event type
     local eventType = event:match("^log%.(.+)")
     if eventType and not self:hasEventType(eventType) then
         table.insert(self.eventTypes, eventType)
-    end
-
-    -- Re-render if auto-scrolling
-    if self.autoScroll then
-        self:render()
     end
 end
 
@@ -331,31 +355,33 @@ function ConsolePage:hasEventType(eventType)
     return false
 end
 
-function ConsolePage:loadRecentLogs()
-    -- Load from logger's ring buffer
-    if self.context.logger and self.context.logger.getRecent then
-        self.logs = self.context.logger:getRecent(self.maxLogs)
-    end
-
-    -- Load from event bus recent events
-    if self.context.eventBus and self.context.eventBus.getRecentEvents then
-        local recentEvents = self.context.eventBus:getRecentEvents(self.maxLogs)
-        for _, event in ipairs(recentEvents) do
-            if event.name:match("^log%.") then
-                table.insert(self.logs, event.data)
-            end
-        end
-    end
-end
-
-function ConsolePage:handleInput(event, key)
+function ConsolePage:handleInput(event, param1, param2, param3)
     if event == "key" then
-        if key == keys.f1 then
+        local key = param1
+
+        if key == keys.s and not keys.isPressed(keys.leftCtrl) then
+            -- Switch to stats page
+            self.context.router:navigate("stats")
+        elseif key == keys.t and not keys.isPressed(keys.leftCtrl) then
+            -- Switch to tests page
+            self.context.router:navigate("tests")
+        elseif key == keys.x and not keys.isPressed(keys.leftCtrl) then
+            -- Switch to settings page
+            self.context.router:navigate("settings")
+        elseif key == keys.f1 then
             self:showHelp()
         elseif key == keys.up then
-            self:navigateHistory(-1)
+            if #self.currentCommand == 0 then
+                self:navigateHistory(-1)
+            else
+                self:scroll(-1)
+            end
         elseif key == keys.down then
-            self:navigateHistory(1)
+            if #self.currentCommand == 0 then
+                self:navigateHistory(1)
+            else
+                self:scroll(1)
+            end
         elseif key == keys.pageUp then
             self:scroll(-10)
         elseif key == keys.pageDown then
@@ -372,12 +398,12 @@ function ConsolePage:handleInput(event, key)
         elseif key == keys.backspace then
             if #self.currentCommand > 0 then
                 self.currentCommand = self.currentCommand:sub(1, -2)
-                self:render()
             end
         end
     elseif event == "char" then
-        self.currentCommand = self.currentCommand .. key
-        self:render()
+        self.currentCommand = self.currentCommand .. param1
+    elseif event == "mouse_scroll" then
+        self:scroll(param1 * 3)
     end
 end
 
@@ -390,12 +416,13 @@ function ConsolePage:executeCommand()
     table.insert(self.commandHistory, self.currentCommand)
     self.historyIndex = #self.commandHistory + 1
 
+    -- Log the command
+    self.logger:info("Command", self.currentCommand)
+
     -- Execute via command factory
     if self.context.commandFactory then
         local success, result = self.context.commandFactory:execute(self.currentCommand)
 
-        -- Log result
-        self.logger:info("Command", self.currentCommand)
         if success then
             self.logger:info("Result", tostring(result))
         else
@@ -405,7 +432,6 @@ function ConsolePage:executeCommand()
 
     -- Clear command
     self.currentCommand = ""
-    self:render()
 end
 
 function ConsolePage:navigateHistory(direction)
@@ -414,18 +440,34 @@ function ConsolePage:navigateHistory(direction)
     if newIndex >= 1 and newIndex <= #self.commandHistory then
         self.historyIndex = newIndex
         self.currentCommand = self.commandHistory[self.historyIndex]
-        self:render()
     elseif newIndex > #self.commandHistory then
         self.historyIndex = #self.commandHistory + 1
         self.currentCommand = ""
-        self:render()
     end
 end
 
 function ConsolePage:scroll(amount)
     self.autoScroll = false
     self.scrollOffset = math.max(0, self.scrollOffset + amount)
-    self:render()
+end
+
+function ConsolePage:autocomplete()
+    if self.context.commandFactory then
+        local suggestions = self.context.commandFactory:getAutocomplete(self.currentCommand)
+        if #suggestions == 1 then
+            self.currentCommand = suggestions[1]
+        elseif #suggestions > 1 then
+            -- Show suggestions in log
+            self.logger:info("Autocomplete", table.concat(suggestions, ", "))
+        end
+    end
+end
+
+function ConsolePage:showHelp()
+    self.logger:info("Help", "Navigation: S=Stats, T=Tests, X=Settings")
+    self.logger:info("Help", "Scrolling: PgUp/PgDown, Home/End")
+    self.logger:info("Help", "Commands: Type and press Enter, Tab for autocomplete")
+    self.logger:info("Help", "History: Up/Down arrows")
 end
 
 return ConsolePage
