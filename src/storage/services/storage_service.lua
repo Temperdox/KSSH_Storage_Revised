@@ -573,11 +573,25 @@ function StorageService:rebuildIndex()
     self.itemIndex:clear()
     local totalItems = 0
 
+    -- Build skip list for special inventories
+    local skipList = {}
+    if self.inputConfig and self.inputConfig.networkId then
+        skipList[self.inputConfig.networkId] = true
+    end
+    if self.outputConfig and self.outputConfig.networkId then
+        skipList[self.outputConfig.networkId] = true
+    end
+    if self.bufferInventory then
+        local bufferName = self.bufferInventory.name or self.bufferInventory.networkId
+        if bufferName then
+            skipList[bufferName] = true
+        end
+    end
+
     for _, storage in ipairs(self.storageMap) do
         -- Skip input, output, buffer
-        if storage.name ~= self.inputConfig.networkId and
-                storage.name ~= self.outputConfig.networkId and
-                storage.name ~= self.bufferInventory.name then
+        if not skipList[storage.name] then
+            self.logger:debug("StorageService", "Scanning storage: " .. storage.name)
 
             local inv = peripheral.wrap(storage.name)
             if inv then
@@ -601,8 +615,17 @@ function StorageService:rebuildIndex()
                         self.itemIndex:put(item.name, current)
                         totalItems = totalItems + 1
                     end
+                    self.logger:debug("StorageService", string.format(
+                        "Scanned %s: found %d slots", storage.name, #slots
+                    ))
+                else
+                    self.logger:warn("StorageService", "Failed to scan: " .. storage.name)
                 end
+            else
+                self.logger:warn("StorageService", "Could not wrap: " .. storage.name)
             end
+        else
+            self.logger:debug("StorageService", "Skipping special inventory: " .. storage.name)
         end
     end
 

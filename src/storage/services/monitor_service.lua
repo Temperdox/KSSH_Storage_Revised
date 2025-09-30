@@ -269,6 +269,10 @@ function MonitorService:drawPagination()
     -- Position pagination just above the dashed separator (height - 12)
     local paginationY = self.height - 12
 
+    -- Clear the line first
+    self.monitor.setCursorPos(1, paginationY)
+    self.monitor.clearLine()
+
     self.monitor.setTextColor(colors.white)
 
     local paginationStr = ""
