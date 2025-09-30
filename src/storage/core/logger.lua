@@ -109,7 +109,26 @@ function Logger:log(level, source, message, data)
     -- Write to file only if file logging is enabled
     if shouldLogFile then
         local date = os.date("%Y%m%d")
-        local logLine = textutils.serialiseJSON(entry)
+
+        -- Try to serialize the full entry, but fall back to simplified version if it fails
+        local logLine
+        local ok, serialized = pcall(textutils.serialiseJSON, entry)
+
+        if ok then
+            logLine = serialized
+        else
+            -- Serialization failed (likely circular reference in data)
+            -- Create a simplified entry without the complex data field
+            local simpleEntry = {
+                level = entry.level,
+                source = entry.source,
+                message = entry.message,
+                timestamp = entry.timestamp,
+                time = entry.time,
+                data = type(entry.data) == "table" and "[Complex Object]" or entry.data
+            }
+            logLine = textutils.serialiseJSON(simpleEntry)
+        end
 
         if self.diskManager then
             -- Use disk manager for automatic failover
