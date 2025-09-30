@@ -18,12 +18,25 @@ function StorageService:new(context)
     o.itemIndex = HashOA_RRSC:new(context.eventBus)
     o.itemIndex:load("/storage/data/item_index.dat")
 
+    -- Get the wired modem for network operations
+    o.modem = peripheral.find("modem", function(name, p)
+        return name == "back" and not p.isWireless()
+    end)
+
+    if not o.modem then
+        o.logger:error("StorageService", "No wired modem found on back!")
+    end
+
     -- Peripheral handles
     -- Buffer is on the wired network
     o.buffer = peripheral.wrap(o.bufferInventory.name)
+    if not o.buffer then
+        o.logger:error("StorageService", "Failed to wrap buffer: " .. o.bufferInventory.name)
+    else
+        o.logger:info("StorageService", "Buffer found: " .. o.bufferInventory.name)
+    end
 
     -- Input/Output chests are directly connected to the computer sides
-    -- Check if peripherals exist on the specified sides
     if peripheral.isPresent(o.inputSide) then
         o.inputChest = peripheral.wrap(o.inputSide)
         o.logger:info("StorageService", "Input chest found on " .. o.inputSide)
@@ -87,15 +100,37 @@ end
 
 function StorageService:monitorInput()
     while self.running do
-        if self.inputChest then
+        if self.inputChest and self.buffer then
             local ok, items = pcall(function() return self.inputChest.list() end)
             if ok and items and next(items) then
-                -- Move items to buffer (buffer is on the network, so use its name)
+                -- Since input chest is on a side and buffer is on network,
+                -- we need to use the buffer to pull from the input chest
+                -- OR use the modem as an intermediary
+
                 for slot, item in pairs(items) do
-                    local moved = self.inputChest.pushItems(
-                            self.bufferInventory.name,  -- Use the network name for the buffer
-                            slot
-                    )
+                    -- Try to have the buffer pull from the input chest
+                    local moved = 0
+
+                    -- First attempt: buffer pulls from input side
+                    if self.buffer.pullItems then
+                        moved = self.buffer.pullItems(self.inputSide, slot)
+                    end
+
+                    -- If that didn't work, try pushing through the modem
+                    if moved == 0 and self.modem then
+                        -- Use the modem to facilitate the transfer
+                        -- The modem can see both the side peripheral and network peripherals
+                        local ok2, result = pcall(function()
+                            -- Try to get the modem to help transfer
+                            return self.inputChest.pushItems(self.bufferInventory.name, slot)
+                        end)
+
+                        if ok2 and result then
+                            moved = result
+                        else
+                            self.logger:debug("StorageService", "Failed to push through modem: " .. tostring(result))
+                        end
+                    end
 
                     if moved and moved > 0 then
                         self.eventBus:publish("storage.inputReceived", {
@@ -135,8 +170,9 @@ function StorageService:processBuffer()
                     local targetStorage = self:findBestStorage(item)
 
                     if targetStorage then
+                        -- Both buffer and storage are on the network, so this should work
                         local moved = self.buffer.pushItems(
-                                targetStorage.name,  -- Network name for storage
+                                targetStorage.name,
                                 slot
                         )
 
@@ -248,9 +284,18 @@ function StorageService:withdraw(itemName, requestedCount)
                     if slotItem.name == itemName and remaining > 0 then
                         local toMove = math.min(remaining, slotItem.count)
 
-                        -- Push to output chest on the left side
-                        -- Since output chest is on a side, use the side name
-                        local moved = inv.pushItems(self.outputSide, slot, toMove)
+                        -- Storage is on network, output is on side
+                        -- Try having output chest pull from storage
+                        local moved = 0
+
+                        if self.outputChest.pullItems then
+                            moved = self.outputChest.pullItems(storage.name, slot, toMove)
+                        end
+
+                        -- If that didn't work, try pushing
+                        if moved == 0 then
+                            moved = inv.pushItems(self.outputSide, slot, toMove)
+                        end
 
                         if moved and moved > 0 then
                             withdrawn = withdrawn + moved
@@ -288,8 +333,7 @@ function StorageService:deposit(items)
         local ok, outputItems = pcall(function() return self.outputChest.list() end)
         if ok and outputItems then
             for slot, item in pairs(outputItems) do
-                -- Push from output (left) to input (right)
-                -- Since both are on sides, use the side name
+                -- Both are on sides, so this should work
                 self.outputChest.pushItems(self.inputSide, slot)
             end
         end
