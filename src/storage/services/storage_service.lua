@@ -19,9 +19,26 @@ function StorageService:new(context)
     o.itemIndex:load("/storage/data/item_index.dat")
 
     -- Peripheral handles
+    -- Buffer is on the wired network
     o.buffer = peripheral.wrap(o.bufferInventory.name)
-    o.inputChest = peripheral.wrap(o.inputSide)
-    o.outputChest = peripheral.wrap(o.outputSide)
+
+    -- Input/Output chests are directly connected to the computer sides
+    -- Check if peripherals exist on the specified sides
+    if peripheral.isPresent(o.inputSide) then
+        o.inputChest = peripheral.wrap(o.inputSide)
+        o.logger:info("StorageService", "Input chest found on " .. o.inputSide)
+    else
+        o.logger:warn("StorageService", "No input chest found on side: " .. o.inputSide)
+        o.inputChest = nil
+    end
+
+    if peripheral.isPresent(o.outputSide) then
+        o.outputChest = peripheral.wrap(o.outputSide)
+        o.logger:info("StorageService", "Output chest found on " .. o.outputSide)
+    else
+        o.logger:warn("StorageService", "No output chest found on side: " .. o.outputSide)
+        o.outputChest = nil
+    end
 
     o.running = false
 
@@ -71,16 +88,16 @@ end
 function StorageService:monitorInput()
     while self.running do
         if self.inputChest then
-            local items = self.inputChest.list()
-            if items and next(items) then
-                -- Move items to buffer
+            local ok, items = pcall(function() return self.inputChest.list() end)
+            if ok and items and next(items) then
+                -- Move items to buffer (buffer is on the network, so use its name)
                 for slot, item in pairs(items) do
                     local moved = self.inputChest.pushItems(
-                            self.bufferInventory.name,
+                            self.bufferInventory.name,  -- Use the network name for the buffer
                             slot
                     )
 
-                    if moved > 0 then
+                    if moved and moved > 0 then
                         self.eventBus:publish("storage.inputReceived", {
                             item = item.name,
                             count = moved,
@@ -108,8 +125,8 @@ end
 function StorageService:processBuffer()
     while self.running do
         if self.buffer then
-            local items = self.buffer.list()
-            if items and next(items) then
+            local ok, items = pcall(function() return self.buffer.list() end)
+            if ok and items and next(items) then
                 for slot, item in pairs(items) do
                     -- Update index
                     self:updateIndex(item.name, item.count, "add")
@@ -119,11 +136,11 @@ function StorageService:processBuffer()
 
                     if targetStorage then
                         local moved = self.buffer.pushItems(
-                                targetStorage.name,
+                                targetStorage.name,  -- Network name for storage
                                 slot
                         )
 
-                        if moved > 0 then
+                        if moved and moved > 0 then
                             self.eventBus:publish("storage.movedToStorage", {
                                 item = item.name,
                                 count = moved,
@@ -149,18 +166,23 @@ function StorageService:findBestStorage(item)
     for _, storage in ipairs(self.storageMap) do
         local inv = peripheral.wrap(storage.name)
         if inv then
-            -- Check for existing stack
-            local slots = inv.list()
-            for slot, slotItem in pairs(slots) do
-                if slotItem.name == item.name and slotItem.count < slotItem.maxCount then
-                    return storage
+            local ok, slots = pcall(function() return inv.list() end)
+            if ok and slots then
+                -- Check for existing stack
+                for slot, slotItem in pairs(slots) do
+                    if slotItem.name == item.name and slotItem.count < (slotItem.maxCount or 64) then
+                        return storage
+                    end
                 end
-            end
 
-            -- Check for empty slot
-            for i = 1, inv.size() do
-                if not slots[i] then
-                    return storage
+                -- Check for empty slot
+                if inv.size then
+                    local invSize = inv.size()
+                    for i = 1, invSize do
+                        if not slots[i] then
+                            return storage
+                        end
+                    end
                 end
             end
         end
@@ -203,6 +225,14 @@ function StorageService:withdraw(itemName, requestedCount)
         return 0
     end
 
+    if not self.outputChest then
+        self.eventBus:publish("storage.withdrawFailed", {
+            item = itemName,
+            reason = "No output chest available"
+        })
+        return 0
+    end
+
     local withdrawn = 0
     local remaining = math.min(requestedCount, itemData.count)
 
@@ -212,21 +242,26 @@ function StorageService:withdraw(itemName, requestedCount)
 
         local inv = peripheral.wrap(storage.name)
         if inv then
-            local slots = inv.list()
-            for slot, slotItem in pairs(slots) do
-                if slotItem.name == itemName then
-                    local toMove = math.min(remaining, slotItem.count)
-                    local moved = inv.pushItems(self.outputSide, slot, toMove)
+            local ok, slots = pcall(function() return inv.list() end)
+            if ok and slots then
+                for slot, slotItem in pairs(slots) do
+                    if slotItem.name == itemName and remaining > 0 then
+                        local toMove = math.min(remaining, slotItem.count)
 
-                    if moved > 0 then
-                        withdrawn = withdrawn + moved
-                        remaining = remaining - moved
+                        -- Push to output chest on the left side
+                        -- Since output chest is on a side, use the side name
+                        local moved = inv.pushItems(self.outputSide, slot, toMove)
 
-                        self.eventBus:publish("storage.itemWithdrawn", {
-                            item = itemName,
-                            count = moved,
-                            from = storage.name
-                        })
+                        if moved and moved > 0 then
+                            withdrawn = withdrawn + moved
+                            remaining = remaining - moved
+
+                            self.eventBus:publish("storage.itemWithdrawn", {
+                                item = itemName,
+                                count = moved,
+                                from = storage.name
+                            })
+                        end
                     end
                 end
             end
@@ -249,9 +284,14 @@ end
 
 function StorageService:deposit(items)
     -- Move items from output chest back to input
-    if self.outputChest then
-        for slot, item in pairs(self.outputChest.list()) do
-            self.outputChest.pushItems(self.inputSide, slot)
+    if self.outputChest and self.inputChest then
+        local ok, outputItems = pcall(function() return self.outputChest.list() end)
+        if ok and outputItems then
+            for slot, item in pairs(outputItems) do
+                -- Push from output (left) to input (right)
+                -- Since both are on sides, use the side name
+                self.outputChest.pushItems(self.inputSide, slot)
+            end
         end
     end
 
@@ -266,28 +306,30 @@ function StorageService:rebuildIndex()
     self.itemIndex:clear()
     local totalItems = 0
 
-    -- Scan all storages
+    -- Scan all storages (these are on the network)
     for _, storage in ipairs(self.storageMap) do
         local inv = peripheral.wrap(storage.name)
         if inv then
-            local slots = inv.list()
-            for slot, item in pairs(slots) do
-                local current = self.itemIndex:get(item.name) or {
-                    count = 0,
-                    stackSize = item.maxCount or 64,
-                    nbtHash = item.nbt,
-                    locations = {}
-                }
+            local ok, slots = pcall(function() return inv.list() end)
+            if ok and slots then
+                for slot, item in pairs(slots) do
+                    local current = self.itemIndex:get(item.name) or {
+                        count = 0,
+                        stackSize = item.maxCount or 64,
+                        nbtHash = item.nbt,
+                        locations = {}
+                    }
 
-                current.count = current.count + item.count
-                table.insert(current.locations, {
-                    id = storage.id,
-                    slot = slot,
-                    count = item.count
-                })
+                    current.count = current.count + item.count
+                    table.insert(current.locations, {
+                        id = storage.id,
+                        slot = slot,
+                        count = item.count
+                    })
 
-                self.itemIndex:put(item.name, current)
-                totalItems = totalItems + 1
+                    self.itemIndex:put(item.name, current)
+                    totalItems = totalItems + 1
+                end
             end
         end
     end

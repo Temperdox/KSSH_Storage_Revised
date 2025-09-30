@@ -61,6 +61,11 @@ function TestsPage:onEnter()
     self:render()
 end
 
+function TestsPage:onTestEvent(event, data)
+    -- Handle test events if needed
+    -- This method was referenced but not implemented
+end
+
 function TestsPage:render()
     term.clear()
 
@@ -170,13 +175,13 @@ function TestsPage:drawOutput()
 
         if line then
             -- Parse line type
-            if line:find("[ERROR]") then
+            if line:find("%[ERROR%]") then
                 term.setTextColor(colors.red)
-            elseif line:find("[WARN]") then
+            elseif line:find("%[WARN%]") then
                 term.setTextColor(colors.yellow)
-            elseif line:find("[OK]") or line:find("[PASS]") then
+            elseif line:find("%[OK%]") or line:find("%[PASS%]") then
                 term.setTextColor(colors.green)
-            elseif line:find("[INFO]") then
+            elseif line:find("%[INFO%]") then
                 term.setTextColor(colors.white)
             else
                 term.setTextColor(colors.lightGray)
@@ -222,7 +227,22 @@ function TestsPage:runTest(testId)
     self:addOutput("[INFO] Duration: " .. test.duration .. " seconds")
 
     -- Execute test based on type
-    self.context.scheduler:submit("tests", function()
+    if self.context.scheduler then
+        self.context.scheduler:submit("tests", function()
+            if testId == "io_burst" then
+                self:runIOBurstTest(test)
+            elseif testId == "index_stress" then
+                self:runIndexStressTest(test)
+            elseif testId == "net_load" then
+                self:runNetworkLoadTest(test)
+            elseif testId == "event_storm" then
+                self:runEventStormTest(test)
+            elseif testId == "memory" then
+                self:runMemoryTest(test)
+            end
+        end)
+    else
+        -- Run directly if no scheduler
         if testId == "io_burst" then
             self:runIOBurstTest(test)
         elseif testId == "index_stress" then
@@ -234,7 +254,7 @@ function TestsPage:runTest(testId)
         elseif testId == "memory" then
             self:runMemoryTest(test)
         end
-    end)
+    end
 
     self:render()
 end
@@ -494,8 +514,13 @@ function TestsPage:addOutput(line)
         table.remove(self.testOutput, 1)
     end
 
-    -- Re-render if visible
-    if self.context.viewFactory:getCurrent() == self then
+    -- Re-render if visible (check if getCurrent exists first)
+    if self.context.viewFactory and self.context.viewFactory.getCurrent then
+        if self.context.viewFactory:getCurrent() == self then
+            self:render()
+        end
+    else
+        -- Fallback: just render
         self:render()
     end
 end
@@ -529,8 +554,19 @@ end
 function TestsPage:handleInput(event, key)
     if event == "key" then
         if key == keys.b then
-            -- Go back
-            self.context.viewFactory:switchTo("console")
+            -- Go back - check different navigation methods
+            if self.context.router then
+                -- Use router if available
+                self.context.router:navigate("console")
+            elseif self.context.viewFactory and self.context.viewFactory.switchTo then
+                -- Use viewFactory if available
+                self.context.viewFactory:switchTo("console")
+            else
+                -- Fallback: just clear and print message
+                term.clear()
+                term.setCursorPos(1, 1)
+                print("Returning to console...")
+            end
         elseif key == keys.c then
             -- Clear output
             self.testOutput = {}
