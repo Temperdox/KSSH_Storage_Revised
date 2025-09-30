@@ -175,6 +175,7 @@ function MonitorService:renderConsolePage()
     -- Console page implementation (if needed)
     local y = 1
     self:drawHeader(y)
+    self.monitor.setTextSize(0.5)
 
     self.monitor.setCursorPos(1, 3)
     self.monitor.setTextColor(colors.white)

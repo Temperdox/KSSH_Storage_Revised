@@ -279,15 +279,13 @@ local function startup()
 
     -- Process 9: Time Wheel
     table.insert(processes, function()
-        timeWheel:runTicker()
+        timeWheel:start()
     end)
 
     -- Process 10: Stats Ticker
     table.insert(processes, function()
+        -- Stats service handles its own timing internally
         while context.running do
-            if context.services.stats then
-                context.services.stats:tick()
-            end
             os.sleep(60)
         end
     end)
