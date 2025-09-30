@@ -1,4 +1,4 @@
--- KSSH Storage System Dynamic Installer with Rainbow Splash (auto flow + list prompts)
+-- KSSH Storage System Dynamic Installer with Integrated Pixelbox Rainbow Splash
 local GITHUB_REPO   = "Temperdox/KSSH_Storage_Revised"
 local GITHUB_BRANCH = "master"
 local GITHUB_PATH   = "src"
@@ -19,6 +19,147 @@ local COLORS = {
 }
 
 local INSTALL_MODE = { CLEAN = "clean", UPDATE = "update" }
+
+-- ========= INTEGRATED PIXELBOX (MIT License) =========
+-- MIT License
+-- Copyright (c) 2024 9551Dev
+--
+-- Permission is hereby granted, free of charge, to any person obtaining a copy
+-- of this software and associated documentation files (the "Software"), to deal
+-- in the Software without restriction, including without limitation the rights
+-- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+-- copies of the Software, and to permit persons to whom the Software is
+-- furnished to do so, subject to the following conditions:
+--
+-- The above copyright notice and this permission notice shall be included in all
+-- copies or substantial portions of the Software.
+--
+-- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+-- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+-- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+-- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+-- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+-- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+-- SOFTWARE.
+
+-- Minimal pixelbox implementation for splash screen
+local function createPixelBox(terminal)
+    local box = {}
+    local w, h = terminal.getSize()
+    box.width = w * 2
+    box.height = h * 3
+    box.canvas = {}
+
+    -- Initialize canvas
+    for y = 1, box.height do
+        box.canvas[y] = {}
+        for x = 1, box.width do
+            box.canvas[y][x] = colors.black
+        end
+    end
+
+    -- Simple render function for our use case
+    function box:render()
+        local char_line, fg_line, bg_line = {}, {}, {}
+        local to_blit = {}
+        for i = 0, 15 do
+            to_blit[2^i] = ("%x"):format(i)
+        end
+
+        local sy = 0
+        for y = 1, self.height, 3 do
+            sy = sy + 1
+            local n = 0
+            for x = 1, self.width, 2 do
+                -- Get the 2x3 block of pixels
+                local block = {}
+                for dy = 0, 2 do
+                    for dx = 0, 1 do
+                        local py = y + dy
+                        local px = x + dx
+                        if self.canvas[py] and self.canvas[py][px] then
+                            table.insert(block, self.canvas[py][px])
+                        else
+                            table.insert(block, colors.black)
+                        end
+                    end
+                end
+
+                -- Find most common color for background
+                local colorCounts = {}
+                for _, c in ipairs(block) do
+                    colorCounts[c] = (colorCounts[c] or 0) + 1
+                end
+                local maxCount, bgColor = 0, colors.black
+                for c, count in pairs(colorCounts) do
+                    if count > maxCount then
+                        maxCount = count
+                        bgColor = c
+                    end
+                end
+
+                -- Simple character selection based on pattern
+                local char = " "
+                local fgColor = bgColor
+
+                -- If not all same color, use a block character
+                local allSame = true
+                for _, c in ipairs(block) do
+                    if c ~= bgColor then
+                        allSame = false
+                        fgColor = c
+                        break
+                    end
+                end
+
+                if not allSame then
+                    -- Use different block characters based on pattern
+                    local topDiff = (block[1] ~= bgColor or block[2] ~= bgColor)
+                    local midDiff = (block[3] ~= bgColor or block[4] ~= bgColor)
+                    local botDiff = (block[5] ~= bgColor or block[6] ~= bgColor)
+
+                    if topDiff and not midDiff and not botDiff then
+                        char = "\143"  -- Upper half block
+                    elseif not topDiff and not midDiff and botDiff then
+                        char = "\131"  -- Lower half block
+                    elseif topDiff and midDiff and botDiff then
+                        char = "\127"  -- Full block
+                    else
+                        char = "\127"  -- Default to full block
+                    end
+                end
+
+                n = n + 1
+                char_line[n] = char
+                fg_line[n] = to_blit[fgColor] or "0"
+                bg_line[n] = to_blit[bgColor] or "f"
+            end
+
+            terminal.setCursorPos(1, sy)
+            terminal.blit(
+                    table.concat(char_line),
+                    table.concat(fg_line),
+                    table.concat(bg_line)
+            )
+        end
+    end
+
+    function box:setPixel(x, y, color)
+        if self.canvas[y] then
+            self.canvas[y][x] = color
+        end
+    end
+
+    function box:clear(color)
+        for y = 1, self.height do
+            for x = 1, self.width do
+                self.canvas[y][x] = color or colors.black
+            end
+        end
+    end
+
+    return box
+end
 
 -- ========= UI helpers =========
 local function clamp(x,a,b) return math.max(a, math.min(b, x)) end
@@ -147,53 +288,104 @@ local function showProgress(title, message, percent, color)
     term.setCursorPos(math.floor((w - #p)/2), barY+2); term.write(p)
 end
 
--- ========= Splash (auto-continue) =========
+-- ========= Splash (auto-continue) with Pixelbox =========
 local function showAnimatedSplash()
     clearScreen()
-    local w,h = term.getSize()
+    local w, h = term.getSize()
 
-    local function drawimage(image,x,y,width,bgcolor,fgcolor)
-        local yy = y
-        term.setCursorPos(x,yy)
-        for i=1,#image do
-            if math.fmod(i-1,width) == 0 and i > 1 then yy = yy + 1; term.setCursorPos(x,yy) end
-            if image[i][2] then term.setBackgroundColor(fgcolor); term.setTextColor(bgcolor)
-            else term.setBackgroundColor(bgcolor); term.setTextColor(fgcolor) end
-            term.write(image[i][1] or " ")
-        end
-        term.setBackgroundColor(colors.black); term.setTextColor(colors.white)
-    end
+    -- Create pixel box
+    local box = createPixelBox(term)
 
-    local image = {
-        {"\x82"},{"\x90",true},{"\x82",true},{"\x90"},{},{},{},{},{" ",true},{" ",true},{" ",true},{" ",true},{" ",true},{" ",true},{" ",true},{"\x83",true},{},
-        {},{},{"\x8b"},{" ",true},{"\x8b",true},{},{},{},{" ",true},{"\x95"},{},{},{},{},{"\x82"},{" ",true},{"\x95"},
-        {},{},{},{"\x82"},{"\x90",true},{"\x82",true},{"\x90"},{},{" ",true},{"\x95"},{},{},{},{},{"\x97",true},{" ",true},{"\x95"},
-        {},{},{},{},{},{"\x84",true},{" ",true},{"\x95"},{" ",true},{"\x95"},{"\x83",true},{"\x83",true},{"\x83",true},{"\x81",true},{" ",true},{"\x9f"},{},
-        {},{},{},{"\x9f",true},{"\x81",true},{"\x9f"},{"\x81"},{},{" ",true},{"\x95"},{"\x83"},{"\x90",true},{" ",true},{"\x93"},{"\x81"},{}, {},
-        {},{},{"\x87",true},{" ",true},{"\x87"},{},{},{},{" ",true},{"\x95"},{},{},{"\x8b"},{" ",true},{"\x8b",true},{}, {},
-        {"\x9f",true},{"\x81",true},{"\x9f"},{"\x81"},{},{},{},{},{" ",true},{"\x95"},{},{},{},{"\x82"},{"\x90",true},{"\x82",true},{"\x90"},
+    -- Your sergal art
+    local sergal_art = {
+        "XXX                    ",
+        " XXXXX                 ",
+        "  XXXXXXX              ",
+        "   XXXXXXXXX           ",
+        "    XXXXXXXXXX         ",
+        "     XXXXXXXXXXXX      ",
+        "      XXXXXXXXXXXX     ",
+        "    XXXXXXXXXXXXXX     ",
+        "  XXXXXXXXXX  XXXXX    ",
+        " XXXXXXXXXXX XXXXXXX   ",
+        "XXXXXXXXXXXXXXXXXXXXXXX",
+        "   XXXXXXXXXXXXXXXXXXXXX",
+        "  XXXXXXXXXXXXXXXXXXXXXX",
+        "  XXXXXXXXXXXX  XXXXXXX",
+        " XXXXXXXXXXXXXXX       ",
+        " XXXXXXXXXXXXXXXXXXX   ",
+        "XXX XXXXXXXXXXXXXXX    ",
+        "   XXXXXXXXXXX         ",
+        "   XXXXXXXXXXX         ",
+        "   XXXXXXXXXXXX        ",
+        "   XX XXXXXXXXXX       ",
+        "   X  XXXXXXXXXX       ",
+        "       XXXXXXXXXX      ",
+        "         XXXXXX X      ",
+        "           XXXX        ",
+        "             XX        ",
+        "              X        ",
     }
-    local imageWidth, imageHeight = 17, 7
-    local centerX = math.floor((w - imageWidth)/2)+1
-    local centerY = math.floor((h - imageHeight)/2) - 2
 
-    local rainbowColors = {colors.red,colors.orange,colors.yellow,colors.lime,colors.green,colors.cyan,
-                           colors.lightBlue,colors.blue,colors.purple,colors.magenta,colors.pink}
+    -- Calculate centering
+    local artWidth = 23  -- Width of the widest line
+    local artHeight = #sergal_art
+    local pixelScale = 1
 
-    for cycle=1,#rainbowColors do
-        drawimage(image, centerX, centerY, imageWidth, colors.black, rainbowColors[cycle])
+    -- Center the sergal art on the canvas
+    local centerX = math.floor((box.width - artWidth) / 2)
+    local centerY = math.floor((box.height - artHeight - 10) / 2)  -- -10 to leave room for text
+
+    -- Ensure it fits on screen
+    if centerY < 2 then centerY = 2 end
+
+    local rainbowColors = {
+        colors.red, colors.orange, colors.yellow, colors.lime,
+        colors.green, colors.cyan, colors.lightBlue, colors.blue,
+        colors.purple, colors.magenta, colors.pink
+    }
+
+    -- Animation loop
+    for cycle = 1, #rainbowColors do
+        local currentColor = rainbowColors[cycle]
+
+        -- Clear box
+        box:clear(colors.black)
+
+        -- Draw sergal with current color
+        for y = 1, #sergal_art do
+            local line = sergal_art[y]
+            for x = 1, #line do
+                if line:sub(x, x) == "X" then
+                    local px = centerX + x
+                    local py = centerY + y
+                    if px > 0 and px <= box.width and py > 0 and py <= box.height then
+                        box:setPixel(px, py, currentColor)
+                    end
+                end
+            end
+        end
+
+        -- Render the pixel art
+        box:render()
+
+        -- Draw text (stays white) - positioned below the sergal
+        local textY = math.min(h - 2, centerY / 3 + artHeight / 3 + 2)
+
         local title = "KSSH Storage System"
-        term.setCursorPos(math.floor((w-#title)/2)+1, centerY + imageHeight + 2)
-        term.setTextColor(rainbowColors[cycle]); term.write(title)
-
-        local version = "Installer v"..VERSION
-        term.setCursorPos(math.floor((w-#version)/2)+1, centerY + imageHeight + 3)
+        term.setCursorPos(math.floor((w - #title) / 2) + 1, textY)
+        term.setBackgroundColor(colors.black)
         term.setTextColor(colors.white)
+        term.write(title)
+
+        local version = "Installer v" .. VERSION
+        term.setCursorPos(math.floor((w - #version) / 2) + 1, textY + 1)
         term.write(version)
+
         sleep(0.08)
     end
 
-    -- brief hold, no keypress
+    -- Brief hold
     sleep(1.5)
     clearScreen()
 end
@@ -333,16 +525,29 @@ local function installFiles(fileList, systemType, mode)
     return #errors == 0, errors, { total=total, updated=updated, skipped=skipped, errors=#errors }
 end
 
--- ========= Detection =========
+-- ========= Detection (FIXED) =========
 local function detectSystemType() return turtle and "turtle" or "computer" end
+
 local function detectExistingInstallation()
-    local storageFiles = {"main.lua", "core/inventory.lua"}
-    local turtleFiles  = {"main.lua", "service/crafter_service.lua"}
-    local hasStorage = true
-    for _,f in ipairs(storageFiles) do if not fs.exists(f) then hasStorage=false; break end end
-    local hasTurtle = true
-    for _,f in ipairs(turtleFiles) do if not fs.exists(f) then hasTurtle=false; break end end
-    if hasStorage then return "storage" elseif hasTurtle then return "turtle" else return nil end
+    -- Check if there are any files/directories other than rom and the installer
+    local currentProgram = shell.getRunningProgram()
+    local hasFiles = false
+
+    for _, file in ipairs(fs.list("/")) do
+        local fullPath = fs.combine("/", file)
+        -- Skip rom directory and the installer itself
+        if file ~= "rom" and fullPath ~= currentProgram and file ~= currentProgram then
+            hasFiles = true
+            break
+        end
+    end
+
+    -- If there are any files (other than rom and installer), consider it an existing installation
+    if hasFiles then
+        return "storage"  -- Default to storage type for existing installations
+    else
+        return nil  -- Clean system
+    end
 end
 
 -- ========= Prompts (list-based / auto-continue) =========
