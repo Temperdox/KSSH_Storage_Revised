@@ -1,10 +1,3 @@
--- ============================================================================
--- FIXED CONSOLE PAGE THAT USES PRINT BUFFER
--- ============================================================================
-
--- /storage/ui/pages/console_page.lua
--- Terminal UI console page that displays captured print output
-
 local ConsolePage = {}
 ConsolePage.__index = ConsolePage
 
@@ -359,13 +352,14 @@ function ConsolePage:handleInput(event, param1, param2, param3)
     if event == "key" then
         local key = param1
 
-        if key == keys.s and not keys.isPressed(keys.leftCtrl) then
+        -- FIXED: Removed keys.isPressed checks that don't exist in ComputerCraft
+        if key == keys.s then
             -- Switch to stats page
             self.context.router:navigate("stats")
-        elseif key == keys.t and not keys.isPressed(keys.leftCtrl) then
+        elseif key == keys.t then
             -- Switch to tests page
             self.context.router:navigate("tests")
-        elseif key == keys.x and not keys.isPressed(keys.leftCtrl) then
+        elseif key == keys.x then
             -- Switch to settings page
             self.context.router:navigate("settings")
         elseif key == keys.f1 then

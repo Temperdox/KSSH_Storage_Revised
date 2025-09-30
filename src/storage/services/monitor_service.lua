@@ -15,6 +15,11 @@ function MonitorService:new(context)
         o.monitor = term.current()
     end
 
+    -- Set text scale for better visibility
+    if o.monitor.setTextScale then
+        o.monitor.setTextScale(0.5)
+    end
+
     o.width, o.height = o.monitor.getSize()
     o.running = false
 
@@ -105,6 +110,11 @@ function MonitorService:run()
 end
 
 function MonitorService:render()
+    -- Ensure text scale is set
+    if self.monitor.setTextScale then
+        self.monitor.setTextScale(0.5)
+    end
+
     self.monitor.clear()
 
     if self.currentPage == "items" then

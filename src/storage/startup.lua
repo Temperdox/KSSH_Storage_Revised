@@ -56,7 +56,7 @@ local function startup()
     local settingsPath = BASE_PATH .. "/cfg/settings.json"
     local settings = fsx.readJson(settingsPath) or {
         theme = "dark",
-        logLevel = "info",
+        logLevel = "error",
         inputSide = "right",
         outputSide = "left",
         soundEnabled = true,
