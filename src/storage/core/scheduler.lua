@@ -37,64 +37,66 @@ function Scheduler:createPool(name, size)
     })
 end
 
-function Scheduler:startWorkers()
+function Scheduler:runWorkers()
+    -- Create all worker processes
+    local processes = {}
+
     for poolName, pool in pairs(self.pools) do
         for workerId = 1, pool.size do
-            self:startWorker(poolName, workerId)
+            table.insert(processes, function()
+                self:workerLoop(poolName, workerId)
+            end)
         end
     end
+
+    -- Run all workers in parallel
+    parallel.waitForAny(table.unpack(processes))
 end
 
-function Scheduler:startWorker(poolName, workerId)
+function Scheduler:workerLoop(poolName, workerId)
     local pool = self.pools[poolName]
     local worker = pool.workers[workerId]
 
-    local function workerLoop()
-        while true do
-            if #pool.queue > 0 then
-                local task = table.remove(pool.queue, 1)
-                worker.busy = true
-                worker.currentTask = task.id
-                pool.active = pool.active + 1
+    while true do
+        if #pool.queue > 0 then
+            local task = table.remove(pool.queue, 1)
+            worker.busy = true
+            worker.currentTask = task.id
+            pool.active = pool.active + 1
 
-                self.eventBus:publish("task.start", {
+            self.eventBus:publish("task.start", {
+                pool = poolName,
+                worker = workerId,
+                task = task.id,
+                label = worker.label
+            })
+
+            local ok, result = pcall(task.fn)
+
+            if ok then
+                task.future:resolve(result)
+                self.eventBus:publish("task.end", {
+                    pool = poolName,
+                    worker = workerId,
+                    task = task.id
+                })
+            else
+                task.future:reject(result)
+                self.eventBus:publish("task.error", {
                     pool = poolName,
                     worker = workerId,
                     task = task.id,
-                    label = worker.label
+                    error = result
                 })
-
-                local ok, result = pcall(task.fn)
-
-                if ok then
-                    task.future:resolve(result)
-                    self.eventBus:publish("task.end", {
-                        pool = poolName,
-                        worker = workerId,
-                        task = task.id
-                    })
-                else
-                    task.future:reject(result)
-                    self.eventBus:publish("task.error", {
-                        pool = poolName,
-                        worker = workerId,
-                        task = task.id,
-                        error = result
-                    })
-                end
-
-                worker.busy = false
-                worker.currentTask = nil
-                pool.active = pool.active - 1
-            else
-                os.sleep(0.05)
             end
+
+            worker.busy = false
+            worker.currentTask = nil
+            pool.active = pool.active - 1
+        else
+            os.sleep(0.05)
         end
     end
-
-    -- Start as coroutine
-    local co = coroutine.create(workerLoop)
-    coroutine.resume(co)
 end
 
 function Scheduler:submit(poolName, fn)

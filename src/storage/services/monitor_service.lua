@@ -63,22 +63,62 @@ function MonitorService:start()
         self:onTaskError(data)
     end)
 
-    -- Start render loop
-    self.scheduler:submit("ui", function()
-        self:renderLoop()
-    end)
-
-    -- Start input handler
-    self.scheduler:submit("ui", function()
-        self:handleInput()
-    end)
-
     self.logger:info("MonitorService", "Service started")
 end
 
 function MonitorService:stop()
     self.running = false
     self.logger:info("MonitorService", "Service stopped")
+end
+
+function MonitorService:run()
+    local processes = {}
+
+    -- Render loop process
+    table.insert(processes, function()
+        while self.running do
+            self:render()
+            os.sleep(0.1)  -- 10 FPS
+        end
+    end)
+
+    -- Input handler process
+    table.insert(processes, function()
+        while self.running do
+            local event, side, x, y = os.pullEvent("monitor_touch")
+
+            if side == peripheral.getName(self.monitor) then
+                self.eventBus:publish("ui.monitor.interacted", {
+                    x = x,
+                    y = y,
+                    page = self.currentPage
+                })
+
+                -- Handle click based on position
+                self:handleClick(x, y)
+            end
+        end
+    end)
+
+    -- Run both in parallel
+    parallel.waitForAny(table.unpack(processes))
+end
+
+function MonitorService:render()
+    self.monitor.clear()
+
+    if self.currentPage == "items" then
+        self:renderItemsPage()
+    elseif self.currentPage == "console" then
+        self:renderConsolePage()
+    end
+
+    -- Always render visualizer at bottom
+    self:renderVisualizer()
+
+    self.eventBus:publish("ui.monitor.update", {
+        page = self.currentPage
+    })
 end
 
 function MonitorService:initializeVisualizer()
@@ -115,27 +155,6 @@ function MonitorService:initializeVisualizer()
     end
 end
 
-function MonitorService:renderLoop()
-    while self.running do
-        self.monitor.clear()
-
-        if self.currentPage == "items" then
-            self:renderItemsPage()
-        elseif self.currentPage == "console" then
-            self:renderConsolePage()
-        end
-
-        -- Always render visualizer at bottom
-        self:renderVisualizer()
-
-        self.eventBus:publish("ui.monitor.update", {
-            page = self.currentPage
-        })
-
-        os.sleep(0.1)
-    end
-end
-
 function MonitorService:renderItemsPage()
     local y = 1
 
@@ -150,6 +169,16 @@ function MonitorService:renderItemsPage()
     -- Item list
     local items = self.context.services.storage:getItems()
     self:drawItemList(items, y)
+end
+
+function MonitorService:renderConsolePage()
+    -- Console page implementation (if needed)
+    local y = 1
+    self:drawHeader(y)
+
+    self.monitor.setCursorPos(1, 3)
+    self.monitor.setTextColor(colors.white)
+    self.monitor.write("Console Page - Not Implemented")
 end
 
 function MonitorService:drawHeader(y)
@@ -361,23 +390,6 @@ function MonitorService:onTaskError(data)
 
         if #worker.stack > self.visualizer.maxHeight then
             table.remove(worker.stack)
-        end
-    end
-end
-
-function MonitorService:handleInput()
-    while self.running do
-        local event, side, x, y = os.pullEvent("monitor_touch")
-
-        if side == peripheral.getName(self.monitor) then
-            self.eventBus:publish("ui.monitor.interacted", {
-                x = x,
-                y = y,
-                page = self.currentPage
-            })
-
-            -- Handle click based on position
-            self:handleClick(x, y)
         end
     end
 end

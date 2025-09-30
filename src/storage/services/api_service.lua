@@ -57,16 +57,6 @@ function ApiService:start()
             "API service started on protocol '%s' as '%s'",
             self.protocol, self.hostname
     ))
-
-    -- Start request handler
-    self.scheduler:submit("net", function()
-        self:handleRequests()
-    end)
-
-    -- Start timeout checker
-    self.scheduler:submit("net", function()
-        self:checkTimeouts()
-    end)
 end
 
 function ApiService:stop()
@@ -78,22 +68,43 @@ function ApiService:stop()
     self.logger:info("ApiService", "Service stopped")
 end
 
-function ApiService:handleRequests()
-    while true do
-        local senderId, message, protocol = rednet.receive(self.protocol, 1)
+function ApiService:run()
+    if not self.modem then
+        self.logger:warn("ApiService", "Cannot run - no modem available")
+        return
+    end
 
-        if senderId then
-            -- Check rate limit
-            if not self:checkRateLimit(senderId) then
-                self:sendError(senderId, nil, "RATE_LIMIT", "Too many requests")
-            else
-                -- Process request
-                self.scheduler:submit("api", function()
-                    self:processRequest(senderId, message)
-                end)
+    local processes = {}
+
+    -- Request handler process
+    table.insert(processes, function()
+        while true do
+            local senderId, message, protocol = rednet.receive(self.protocol, 1)
+
+            if senderId then
+                -- Check rate limit
+                if not self:checkRateLimit(senderId) then
+                    self:sendError(senderId, nil, "RATE_LIMIT", "Too many requests")
+                else
+                    -- Process request asynchronously
+                    self.scheduler:submit("api", function()
+                        self:processRequest(senderId, message)
+                    end)
+                end
             end
         end
-    end
+    end)
+
+    -- Timeout checker process
+    table.insert(processes, function()
+        while true do
+            self:checkTimeouts()
+            os.sleep(5)
+        end
+    end)
+
+    -- Run both in parallel
+    parallel.waitForAny(table.unpack(processes))
 end
 
 function ApiService:processRequest(senderId, message)
@@ -233,25 +244,21 @@ function ApiService:checkRateLimit(senderId)
 end
 
 function ApiService:checkTimeouts()
-    while true do
-        local now = os.epoch("utc") / 1000
+    local now = os.epoch("utc") / 1000
 
-        for requestId, request in pairs(self.activeRequests) do
-            local elapsed = now - (request.startTime / 1000)
+    for requestId, request in pairs(self.activeRequests) do
+        local elapsed = now - (request.startTime / 1000)
 
-            if elapsed > request.timeout then
-                self:sendError(request.senderId, requestId, "TIMEOUT",
-                        "Request timed out")
-                self.activeRequests[requestId] = nil
+        if elapsed > request.timeout then
+            self:sendError(request.senderId, requestId, "TIMEOUT",
+                    "Request timed out")
+            self.activeRequests[requestId] = nil
 
-                self.logger:warn("ApiService", string.format(
-                        "Request %d timed out after %ds",
-                        requestId, request.timeout
-                ))
-            end
+            self.logger:warn("ApiService", string.format(
+                    "Request %d timed out after %ds",
+                    requestId, request.timeout
+            ))
         end
-
-        os.sleep(5)
     end
 end
 

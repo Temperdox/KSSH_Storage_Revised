@@ -1,10 +1,3 @@
--- ============================================================================
--- PART 1: STARTUP.LUA
--- ============================================================================
-
--- /storage/startup.lua
--- Main entry point that orchestrates the entire storage system
-
 local function startup()
     -- System paths
     local BASE_PATH = "/storage"
@@ -24,7 +17,7 @@ local function startup()
     local MonitorService = require("services.monitor_service")
     local ApiService = require("services.api_service")
     local StatsService = require("services.stats_service")
-    local TestsService = require("services.tecdsts_service")
+    local TestsService = require("services.tests_service")
     local SettingsService = require("services.settings_service")
     local SoundService = require("services.sound_service")
     local EventsBridge = require("services.events_bridge")
@@ -78,11 +71,6 @@ local function startup()
     scheduler:createPool("tests", 2)
     scheduler:createPool("sound", 1)
 
-    -- Publish scheduler pools on event bus
-    eventBus:publish("system.poolsCreated", {
-        pools = scheduler:getPools()
-    })
-
     -- Bootstrap storage discovery
     logger:info("Bootstrap", "Discovering storage inventories...")
     local bootstrap = Bootstrap:new(eventBus, logger)
@@ -109,11 +97,13 @@ local function startup()
         storageMap = storageMap,
         bufferInventory = bufferInventory,
         timeWheel = timeWheel,
-        basePath = BASE_PATH
+        basePath = BASE_PATH,
+        running = true,
+        startTime = os.epoch("utc")
     }
 
     -- Initialize services
-    local services = {
+    context.services = {
         events = EventsBridge:new(context),
         storage = StorageService:new(context),
         monitor = MonitorService:new(context),
@@ -124,59 +114,172 @@ local function startup()
         sound = SoundService:new(context)
     }
 
-    -- Start all services in parallel
+    -- Start all services (non-blocking initialization)
     logger:info("System", "Starting services...")
 
-    local startTasks = {}
-    for name, service in pairs(services) do
-        table.insert(startTasks, scheduler:submit("io", function()
+    for name, service in pairs(context.services) do
+        if service.start then
             service:start()
-            logger:info("System", string.format("Service '%s' started", name))
+            logger:info("System", string.format("Service '%s' initialized", name))
             eventBus:publish("system.serviceStarted", {service = name})
-        end))
-    end
-
-    -- Wait for all services to start
-    for _, task in ipairs(startTasks) do
-        task:await()
-    end
-
-    logger:info("System", "[OK] All services started successfully!")
-    eventBus:publish("system.ready", {
-        timestamp = os.epoch("utc"),
-        services = services
-    })
-
-    -- Start time wheel (begins per-minute ticks)
-    timeWheel:start()
-
-    -- Main event loop
-    while true do
-        local event = {os.pullEvent()}
-
-        -- Distribute raw events to event bus
-        eventBus:publish("raw." .. event[1], {
-            type = event[1],
-            params = {table.unpack(event, 2)}
-        })
-
-        -- Handle system shutdown
-        if event[1] == "terminate" then
-            logger:info("System", "Shutting down...")
-
-            -- Stop all services
-            for name, service in pairs(services) do
-                if service.stop then
-                    service:stop()
-                end
-            end
-
-            -- Flush logs
-            logger:flush()
-
-            break
         end
     end
+
+    logger:info("System", "[OK] All services initialized!")
+    eventBus:publish("system.ready", {
+        timestamp = os.epoch("utc"),
+        services = context.services
+    })
+
+    -- Start time wheel
+    timeWheel:start()
+
+    -- ========================================================================
+    -- PARALLEL PROCESS EXECUTION
+    -- ========================================================================
+
+    local processes = {}
+
+    -- Process 1: Storage Service Handler
+    table.insert(processes, function()
+        logger:debug("Process", "Storage handler starting...")
+        while context.running do
+            if context.services.storage and context.services.storage.monitorInput then
+                context.services.storage:monitorInput()
+            end
+            os.sleep(0.1)
+        end
+    end)
+
+    -- Process 2: Storage Buffer Processor
+    table.insert(processes, function()
+        logger:debug("Process", "Buffer processor starting...")
+        while context.running do
+            if context.services.storage and context.services.storage.processBuffer then
+                context.services.storage:processBuffer()
+            end
+            os.sleep(0.5)
+        end
+    end)
+
+    -- Process 3: Monitor Service
+    if context.services.monitor then
+        table.insert(processes, function()
+            logger:debug("Process", "Monitor service starting...")
+            context.services.monitor:run()
+        end)
+    end
+
+    -- Process 4: API Service
+    if context.services.api then
+        table.insert(processes, function()
+            logger:debug("Process", "API service starting...")
+            context.services.api:run()
+        end)
+    end
+
+    -- Process 5: Event Bridge Processor
+    table.insert(processes, function()
+        logger:debug("Process", "Event bridge starting...")
+        while context.running do
+            context.eventBus:processQueue()
+            os.sleep(0.05)
+        end
+    end)
+
+    -- Process 6: Stats Service
+    if context.services.stats then
+        table.insert(processes, function()
+            logger:debug("Process", "Stats service starting...")
+            while context.running do
+                context.services.stats:tick()
+                os.sleep(60)  -- Tick every minute
+            end
+        end)
+    end
+
+    -- Process 7: Scheduler Worker Manager
+    table.insert(processes, function()
+        logger:debug("Process", "Scheduler workers starting...")
+        scheduler:runWorkers()
+    end)
+
+    -- Process 8: Terminal UI (if available)
+    local Router = require("ui.router")
+    local router = Router:new(context)
+
+    -- Register pages
+    router:register("console", require("ui.pages.console_page"):new(context))
+    router:register("stats", require("ui.pages.stats_page"):new(context))
+    router:register("tests", require("ui.pages.tests_page"):new(context))
+    router:register("settings", require("ui.pages.settings_page"):new(context))
+
+    -- Navigate to console
+    router:navigate("console")
+
+    table.insert(processes, function()
+        logger:debug("Process", "Terminal UI starting...")
+        while context.running do
+            local event = {os.pullEvent()}
+
+            -- Handle termination
+            if event[1] == "terminate" then
+                context.running = false
+                logger:info("System", "Shutdown signal received")
+                break
+            end
+
+            -- Route to current page
+            router:handleInput(table.unpack(event))
+
+            -- Publish raw event
+            eventBus:publish("raw." .. event[1], {
+                type = event[1],
+                params = {table.unpack(event, 2)}
+            })
+        end
+    end)
+
+    -- Process 9: Time Wheel Ticker
+    table.insert(processes, function()
+        logger:debug("Process", "Time wheel starting...")
+        timeWheel:runTicker()
+    end)
+
+    -- Process 10: Command Handler (if commands registered)
+    local CommandFactory = require("factories.command_factory")
+    local commandFactory = CommandFactory:new(context)
+
+    -- Load commands
+    local CommandLoader = require("commands.init")
+    CommandLoader.loadAll(commandFactory, context)
+
+    context.commandFactory = commandFactory
+
+    -- ========================================================================
+    -- RUN ALL PROCESSES IN PARALLEL
+    -- ========================================================================
+
+    logger:info("System", "Starting parallel processes...")
+
+    -- Run all processes in parallel
+    parallel.waitForAny(table.unpack(processes))
+
+    -- Cleanup on shutdown
+    logger:info("System", "Shutting down...")
+
+    -- Stop all services
+    for name, service in pairs(context.services) do
+        if service.stop then
+            service:stop()
+            logger:debug("System", string.format("Service '%s' stopped", name))
+        end
+    end
+
+    -- Flush logs
+    logger:flush()
+
+    print("[SHUTDOWN] Storage system stopped")
 end
 
 -- Run startup
