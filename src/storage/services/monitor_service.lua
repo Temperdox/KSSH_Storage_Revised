@@ -103,6 +103,10 @@ function MonitorService:start()
         self:onItemUpdated(data)
     end)
 
+    self.eventBus:subscribe("storage.indexRebuilt", function(event, data)
+        self:onIndexRebuilt(data)
+    end)
+
     -- Start stack decay timer
     self.scheduler:submit("ui", function()
         self:stackDecayLoop()
@@ -238,23 +242,37 @@ end
 
 function MonitorService:drawLetterNav()
     self.monitor.setCursorPos(1, 3)
+    self.monitor.clearLine()
 
     if not self.currentLetter then
-        -- Show all letters
+        -- Show all letters - this is the "all items" view
         self.monitor.setTextColor(colors.cyan)
         self.monitor.write("#")
 
         for i = 1, 26 do
             local letter = string.char(96 + i)
-            self.monitor.setTextColor(colors.white)
+            self.monitor.setTextColor(colors.lightGray)
             self.monitor.write(letter)
         end
     else
-        -- Show current letter centered
+        -- Show current letter with back option
+        self.monitor.setTextColor(colors.gray)
+        self.monitor.write("[")
         self.monitor.setTextColor(colors.yellow)
-        local x = math.floor(self.width / 2)
-        self.monitor.setCursorPos(x, 3)
+        self.monitor.write("X")
+        self.monitor.setTextColor(colors.gray)
+        self.monitor.write("] ")
+
+        self.monitor.setTextColor(colors.yellow)
+        self.monitor.write("Showing: ")
+        self.monitor.setTextColor(colors.white)
         self.monitor.write(self.currentLetter:upper())
+
+        -- Show item count
+        local items = self:getFilteredItems()
+        local countStr = " (" .. #items .. " items)"
+        self.monitor.setTextColor(colors.gray)
+        self.monitor.write(countStr)
     end
 end
 
@@ -266,14 +284,14 @@ function MonitorService:drawPagination()
 
     if totalPages <= 1 then return end
 
-    -- Position pagination just above the dashed separator (height - 12)
+    -- Position pagination ONE line above the dashed separator
     local paginationY = self.height - 12
 
     -- Clear the line first
     self.monitor.setCursorPos(1, paginationY)
     self.monitor.clearLine()
 
-    self.monitor.setTextColor(colors.white)
+    self.monitor.setTextColor(colors.lightGray)
 
     local paginationStr = ""
 
@@ -329,10 +347,12 @@ function MonitorService:drawPagination()
     -- Next controls
     if self.currentPage < totalPages then
         paginationStr = paginationStr .. " > >>"
+    else
+        paginationStr = paginationStr .. "     "
     end
 
-    -- Center the pagination
-    local x = math.floor((self.width - #paginationStr) / 2)
+    -- Center the pagination properly
+    local x = math.max(1, math.floor((self.width - #paginationStr) / 2) + 1)
     self.monitor.setCursorPos(x, paginationY)
     self.monitor.write(paginationStr)
 end
@@ -342,9 +362,9 @@ function MonitorService:drawAllItems()
     local startY = 4
 
     if #items == 0 then
-        self.monitor.setCursorPos(self.width / 2 - 2, startY)
-        self.monitor.setTextColor(colors.lightGray)
-        self.monitor.write("EMPTY")
+        self.monitor.setCursorPos(math.floor(self.width / 2) - 5, math.floor(self.height / 2))
+        self.monitor.setTextColor(colors.gray)
+        self.monitor.write("NO ITEMS")
         return
     end
 
@@ -353,12 +373,12 @@ end
 
 function MonitorService:drawFilteredItems()
     local items = self:getFilteredItems()
-    local startY = 4  -- Start right after letter nav, pagination is at bottom
+    local startY = 4
 
     if #items == 0 then
-        self.monitor.setCursorPos(self.width / 2 - 2, startY)
-        self.monitor.setTextColor(colors.lightGray)
-        self.monitor.write("EMPTY")
+        self.monitor.setCursorPos(math.floor(self.width / 2) - 5, math.floor(self.height / 2))
+        self.monitor.setTextColor(colors.gray)
+        self.monitor.write("NO ITEMS")
         return
     end
 
@@ -451,13 +471,13 @@ function MonitorService:drawVisualizer()
                 end
             end
 
-            -- Draw worker number (moved up by 2 lines)
+            -- Draw worker number
             self.monitor.setCursorPos(stackX, startY + self.visualizer.maxHeight - 2)
             self.monitor.setTextColor(pool.color)
             self.monitor.write(tostring(w))
         end
 
-        -- Draw pool label (moved up by 2 lines, now right below worker numbers)
+        -- Draw pool label
         local label = self.visualizer.labels[poolName] or poolName
         local labelX = x + math.floor((#pool.workers * 2 - #label) / 2)
         self.monitor.setCursorPos(labelX, startY + self.visualizer.maxHeight - 1)
@@ -545,14 +565,26 @@ function MonitorService:onTaskEnd(data)
 end
 
 function MonitorService:onItemAdded(data)
-    self.itemColors[data.item] = "new"
-    self.itemTimers[data.item] = os.epoch("utc") / 1000
+    self.itemColors[data.key or data.item] = "new"
+    self.itemTimers[data.key or data.item] = os.epoch("utc") / 1000
 end
 
 function MonitorService:onItemUpdated(data)
-    if self.itemColors[data.item] ~= "new" then
-        self.itemColors[data.item] = "updated"
-        self.itemTimers[data.item] = os.epoch("utc") / 1000
+    local itemName = data.key or data.item
+    if self.itemColors[itemName] ~= "new" then
+        self.itemColors[itemName] = "updated"
+        self.itemTimers[itemName] = os.epoch("utc") / 1000
+    end
+end
+
+function MonitorService:onIndexRebuilt(data)
+    self.logger:info("MonitorService", string.format(
+        "Index rebuilt: %d unique items, %d stacks",
+        data.uniqueItems or 0, data.totalStacks or 0
+    ))
+    -- Force a render to show the updated items
+    if self.running then
+        self:render()
     end
 end
 
@@ -601,18 +633,23 @@ end
 
 function MonitorService:handleClick(x, y)
     -- Letter navigation
-    if y == 3 and not self.currentLetter then
-        if x == 1 then
-            self.currentLetter = "#"
-            self.currentPage = 1
-        elseif x >= 2 and x <= 27 then
-            self.currentLetter = string.char(96 + x - 1)
-            self.currentPage = 1
+    if y == 3 then
+        if self.currentLetter then
+            -- Click [X] to go back (positions 1-3)
+            if x >= 1 and x <= 3 then
+                self.currentLetter = nil
+                self.currentPage = 1
+            end
+        else
+            -- Click on letters to filter
+            if x == 1 then
+                self.currentLetter = "#"
+                self.currentPage = 1
+            elseif x >= 2 and x <= 27 then
+                self.currentLetter = string.char(96 + x - 1)
+                self.currentPage = 1
+            end
         end
-    elseif y == 3 and self.currentLetter then
-        -- Click on letter to go back
-        self.currentLetter = nil
-        self.currentPage = 1
     end
 
     -- Sort options
@@ -624,15 +661,23 @@ function MonitorService:handleClick(x, y)
         end
     end
 
-    -- Pagination (at height - 12)
+    -- Pagination clicks
     if y == self.height - 12 and self.currentLetter then
         local items = self:getFilteredItems()
         local totalPages = math.ceil(#items / self.itemsPerPage)
 
-        if x < 10 and self.currentPage > 1 then
+        -- Previous page (left side)
+        if x <= 5 and self.currentPage > 1 then
             self.currentPage = self.currentPage - 1
-        elseif x > self.width - 10 and self.currentPage < totalPages then
+            -- Next page (right side)
+        elseif x >= self.width - 5 and self.currentPage < totalPages then
             self.currentPage = self.currentPage + 1
+            -- First page (clicking "<<")
+        elseif x <= 3 and self.currentPage > 1 then
+            self.currentPage = 1
+            -- Last page (clicking ">>")
+        elseif x >= self.width - 3 and self.currentPage < totalPages then
+            self.currentPage = totalPages
         end
     end
 end

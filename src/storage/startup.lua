@@ -150,9 +150,11 @@ local function startup()
         sound = SoundService:new(context)
     }
 
-    -- Start services
-    for name, service in pairs(context.services) do
-        if service.start then
+    -- Start services in specific order to ensure proper event flow
+    local serviceOrder = {"events", "monitor", "storage", "api", "stats", "tests", "settings", "sound"}
+    for _, name in ipairs(serviceOrder) do
+        local service = context.services[name]
+        if service and service.start then
             service:start()
             logger:info("System", string.format("Service '%s' initialized", name))
         end

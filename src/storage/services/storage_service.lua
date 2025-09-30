@@ -560,8 +560,10 @@ function StorageService:updateIndex(itemName, count, operation)
 
     self.itemIndex:put(itemName, current)
 
+    -- FIX: Use consistent field names
     self.eventBus:publish("index.updated", {
-        item = itemName,
+        key = itemName,  -- Use 'key' to match monitor expectations
+        item = itemName, -- Also include 'item' for compatibility
         count = current.count,
         operation = operation
     })
@@ -614,9 +616,17 @@ function StorageService:rebuildIndex()
 
                         self.itemIndex:put(item.name, current)
                         totalItems = totalItems + 1
+
+                        -- FIX: Publish event for each item indexed
+                        self.eventBus:publish("storage.itemIndexed", {
+                            key = item.name,  -- Use 'key' to match monitor expectations
+                            item = item.name, -- Also include 'item' for compatibility
+                            count = current.count,
+                            storage = storage.name
+                        })
                     end
                     self.logger:debug("StorageService", string.format(
-                        "Scanned %s: found %d slots", storage.name, #slots
+                            "Scanned %s: found %d slots", storage.name, #slots
                     ))
                 else
                     self.logger:warn("StorageService", "Failed to scan: " .. storage.name)
