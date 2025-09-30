@@ -1,4 +1,4 @@
--- KSSH Storage System Dynamic Installer
+-- NETStore Storage System Dynamic Installer
 local GITHUB_REPO   = "Temperdox/KSSH_Storage_Revised"
 local GITHUB_BRANCH = "master"
 local GITHUB_PATH   = "src"
@@ -347,7 +347,7 @@ local function showAnimatedSplash()
         -- Draw text (stays white) - positioned below the sergal
         local textY = math.min(h - 2, startY + sergalHeight + 2)
 
-        local title = "KSSH Storage System"
+        local title = "NETStore Storage System"
         term.setCursorPos(math.floor((w - #title) / 2) + 1, textY)
         term.setTextColor(colors.white)
         term.write(title)
@@ -640,7 +640,7 @@ local function main()
         "Turtle-based crafting system with recipe learning and remote control",
         "Exit installer without making changes"
     }
-    local selection = pickFromList("KSSH Installer - Select System Type", options, descriptions)
+    local selection = pickFromList("NETStore Installer - Select System Type", options, descriptions)
     if not selection or selection == 3 then clearScreen(); print("Installation cancelled."); return end
 
     local selectedType = options[selection]
@@ -669,7 +669,7 @@ local function main()
     -- Set label if needed
     if not os.getComputerLabel() then
         if selectedType == "Storage Computer" then os.setComputerLabel("KSSH_Storage_"..os.getComputerID())
-        else os.setComputerLabel("KSSH_Turtle_"..os.getComputerID()) end
+        else os.setComputerLabel("NETStore_Turtle_"..os.getComputerID()) end
     end
 
     -- Final action (list-based, no Y/N keys)
@@ -689,7 +689,7 @@ local function main()
 
     if pick == 1 then
         clearScreen(); term.setCursorPos(1,1)
-        print("Starting KSSH Storage System...")
+        print("Starting NETStore Storage System...")
         sleep(0.4)
         if hasStartup then shell.run("startup") else shell.run("main") end
     elseif pick == 2 then
