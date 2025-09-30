@@ -1,3 +1,6 @@
+-- /storage/core/event_bus.lua
+-- Optimized event bus that doesn't flood the system with events
+
 local EventBus = {}
 EventBus.__index = EventBus
 
@@ -6,8 +9,22 @@ function EventBus:new()
     o.listeners = {}
     o.queue = {}
     o.recentEvents = {}
-    o.maxRecent = 1000
+    o.maxRecent = 100  -- Reduced from 1000
     o.eventTypes = {}
+
+    -- Events to not store in recent events (too noisy)
+    o.transientEvents = {
+        "raw%..*",           -- All raw events
+        "ui%..*",            -- UI updates
+        "sound%..*",         -- Sound events
+        "task%.start",       -- Task lifecycle
+        "task%.end",
+        "log%.trace",        -- Low level logs
+        "log%.debug",
+        "stats%.track",
+        "events%.filter"
+    }
+
     return o
 end
 
@@ -19,40 +36,67 @@ function EventBus:subscribe(pattern, callback)
     return #self.listeners[pattern]
 end
 
+function EventBus:isTransient(eventName)
+    for _, pattern in ipairs(self.transientEvents) do
+        if eventName:match(pattern) then
+            return true
+        end
+    end
+    return false
+end
+
 function EventBus:publish(eventName, data)
-    -- Track event type
-    self.eventTypes[eventName] = (self.eventTypes[eventName] or 0) + 1
+    -- Track event type count (but not for transient events)
+    if not self:isTransient(eventName) then
+        self.eventTypes[eventName] = (self.eventTypes[eventName] or 0) + 1
 
-    -- Add to recent events ring buffer
-    table.insert(self.recentEvents, {
-        name = eventName,
-        data = data,
-        timestamp = os.epoch("utc")
-    })
+        -- Only store non-transient events in recent events
+        table.insert(self.recentEvents, {
+            name = eventName,
+            data = data,
+            timestamp = os.epoch("utc")
+        })
 
-    if #self.recentEvents > self.maxRecent then
-        table.remove(self.recentEvents, 1)
+        if #self.recentEvents > self.maxRecent then
+            table.remove(self.recentEvents, 1)
+        end
     end
 
-    -- Immediate dispatch
+    -- Immediate dispatch to all listeners
     for pattern, callbacks in pairs(self.listeners) do
         if eventName:match(pattern) then
             for _, callback in ipairs(callbacks) do
+                -- Use pcall to prevent one bad listener from breaking everything
                 local ok, err = pcall(callback, eventName, data)
-                if not ok then
-                    print("[EVENT ERROR]", err)
+                -- Only log errors for actual problems, not normal events
+                if not ok and not eventName:match("^raw%.") then
+                    -- Don't use the logger here to avoid recursion
+                    -- Just print critical errors
+                    if eventName:match("error") or eventName:match("fail") then
+                        print("[EVENT ERROR]", eventName, err)
+                    end
                 end
             end
         end
     end
 
-    -- Queued dispatch
-    table.insert(self.queue, {name = eventName, data = data})
+    -- Only queue non-transient events
+    if not self:isTransient(eventName) then
+        table.insert(self.queue, {name = eventName, data = data})
+
+        -- Keep queue size limited
+        if #self.queue > 50 then
+            table.remove(self.queue, 1)
+        end
+    end
 end
 
 function EventBus:processQueue()
-    while #self.queue > 0 do
+    local processed = 0
+    while #self.queue > 0 and processed < 10 do  -- Process max 10 events per tick
         local event = table.remove(self.queue, 1)
+        processed = processed + 1
+
         -- Process without re-queueing
         for pattern, callbacks in pairs(self.listeners) do
             if event.name:match(pattern) then
@@ -81,6 +125,26 @@ function EventBus:getEventTypes()
     end
     table.sort(types, function(a, b) return a.count > b.count end)
     return types
+end
+
+-- Clean up old events periodically
+function EventBus:cleanup()
+    -- Clear very old events from recent events
+    local cutoff = os.epoch("utc") - 60000  -- Keep only last minute
+    local newRecent = {}
+    for _, event in ipairs(self.recentEvents) do
+        if event.timestamp > cutoff then
+            table.insert(newRecent, event)
+        end
+    end
+    self.recentEvents = newRecent
+
+    -- Reset event type counts if they get too large
+    for eventType, count in pairs(self.eventTypes) do
+        if count > 10000 then
+            self.eventTypes[eventType] = 1000  -- Reset to reasonable number
+        end
+    end
 end
 
 return EventBus
