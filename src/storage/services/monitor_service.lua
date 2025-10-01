@@ -21,10 +21,11 @@ function MonitorService:new(context)
     -- UI state
     o.currentLetter = nil  -- nil means show all, "#" for special chars, "a"-"z" for letters
     o.currentPage = 1
-    -- itemsPerPage calculated dynamically: (height - 16 rows for UI) * 2 columns
-    -- Layout: Header(1) + TableHeaders(1) + Items(height-16) + FreeSlots(1) + Filter(1) + Pagination(1) + Separator(1) + Visualizer(10) + I/O(1)
+    -- itemsPerPage calculated dynamically: (height - 19 rows for UI) * 2 columns
+    -- Layout for 0.5 scale: Header(1) + TableHeaders(1) + Items(height-19) + Space(1) + ProgressBar(1) + Filter(1) + Pagination(1) + Separator(1) + Visualizer(10) + I/O(1)
     o.sortBy = "name"
     o.scrollOffset = 0
+    o.showStatsModal = false  -- Stats modal visibility
 
     -- Item display state
     o.itemColors = {}  -- Track color states for items
@@ -184,6 +185,7 @@ function MonitorService:start()
     -- Do initial cache population and screen clear
     self:refreshCache()
     self:updateFreeSlots()
+    self.monitor.setTextScale(0.5)
     self.monitor.setBackgroundColor(colors.black)
     self.monitor.clear()
 
@@ -314,6 +316,11 @@ function MonitorService:renderUI()
 
     -- I/O indicators at very bottom (static, draw once on start)
     self:drawIOIndicators()
+
+    -- Stats modal overlay (drawn last, on top of everything)
+    if self.showStatsModal then
+        self:drawStatsModal()
+    end
 end
 
 function MonitorService:drawHeader()
@@ -324,15 +331,11 @@ function MonitorService:drawHeader()
     -- Build the entire line content
     local line = string.rep(" ", self.width)
 
-    -- Get total item count
-    local items = self:getAllItems()
-    local uniqueCount = #items
-
     -- Build header content
-    local title = string.format(" STORAGE | %d Items", uniqueCount)
+    local title = " STORAGE | [Stats]"
 
     -- Right side: Sort buttons
-    local sortX = self.width - 18
+    local sortX = self.width - 19
     local sortText = "Sort: "
     if self.sortBy == "name" then
         sortText = sortText .. "[Name]  Count "
@@ -351,7 +354,7 @@ function MonitorService:drawHeader()
 end
 
 function MonitorService:drawLetterFilter()
-    local y = self.height - 13
+    local y = self.height - 15
     self.monitor.setCursorPos(1, y)
     self.monitor.setBackgroundColor(colors.black)
 
@@ -386,14 +389,14 @@ function MonitorService:drawTableHeaders()
     for i = 1, self.width do chars[i] = " " end
 
     -- Left column headers
-    local leftHeaders = " ITEM" .. string.rep(" ", nameWidth - 4) .. "COUNT" .. string.rep(" ", countWidth - 4) .. "STACK"
+    local leftHeaders = " ITEM" .. string.rep(" ", nameWidth - 5) .. "COUNT" .. string.rep(" ", countWidth - 4) .. "STACK"
     for i = 1, #leftHeaders do
         chars[i] = leftHeaders:sub(i, i)
     end
 
     -- Right column headers (offset by +1 for divider)
     local offset = columnWidth + 2
-    local rightHeaders = "ITEM" .. string.rep(" ", nameWidth - 3) .. "COUNT" .. string.rep(" ", countWidth - 4) .. "STACK"
+    local rightHeaders = "ITEM" .. string.rep(" ", nameWidth - 5) .. "COUNT" .. string.rep(" ", countWidth - 4) .. "STACK"
     for i = 1, math.min(#rightHeaders, self.width - offset) do
         chars[offset + i] = rightHeaders:sub(i, i)
     end
@@ -428,7 +431,7 @@ function MonitorService:drawItemsTable()
 
     -- Calculate available rows (from line 3 to line before free slots)
     local startY = 3
-    local endY = self.height - 14
+    local endY = self.height - 19
     local maxRows = endY - startY + 1
 
     -- Calculate items per page (rows per column * 2 columns)
@@ -501,7 +504,7 @@ function MonitorService:drawItemsTable()
             if #countStr > countWidth then
                 countStr = countStr:sub(1, countWidth)
             end
-            self.monitor.setCursorPos(xOffset + nameWidth + 2, y)
+            self.monitor.setCursorPos(xOffset + nameWidth + 3, y)
             self.monitor.setTextColor(colors.lime)
             self.monitor.write(countStr)
 
@@ -512,7 +515,7 @@ function MonitorService:drawItemsTable()
             if #stackStr > stacksWidth then
                 stackStr = stackStr:sub(1, stacksWidth)
             end
-            self.monitor.setCursorPos(xOffset + nameWidth + countWidth + 3, y)
+            self.monitor.setCursorPos(xOffset + nameWidth + countWidth + 4, y)
             self.monitor.setTextColor(colors.orange)
             self.monitor.write(stackStr)
         end
@@ -525,7 +528,7 @@ function MonitorService:drawItemsTable()
             -- Draw background (1 char narrower for divider)
             self.monitor.setCursorPos(xOffset + 1, y)
             self.monitor.setBackgroundColor(bgColor)
-            self.monitor.write(string.rep(" ", columnWidth - 1))
+            self.monitor.write(string.rep(" ", columnWidth))
 
             -- Item name
             self.monitor.setCursorPos(xOffset + 2, y)
@@ -542,7 +545,7 @@ function MonitorService:drawItemsTable()
             if #countStr > countWidth then
                 countStr = countStr:sub(1, countWidth)
             end
-            self.monitor.setCursorPos(xOffset + nameWidth + 2, y)
+            self.monitor.setCursorPos(xOffset + nameWidth + 3, y)
             self.monitor.setTextColor(colors.lime)
             self.monitor.write(countStr)
 
@@ -553,7 +556,7 @@ function MonitorService:drawItemsTable()
             if #stackStr > stacksWidth then
                 stackStr = stackStr:sub(1, stacksWidth)
             end
-            self.monitor.setCursorPos(xOffset + nameWidth + countWidth + 3, y)
+            self.monitor.setCursorPos(xOffset + nameWidth + countWidth + 4, y)
             self.monitor.setTextColor(colors.orange)
             self.monitor.write(stackStr)
         end
@@ -596,17 +599,61 @@ function MonitorService:updateFreeSlots()
 end
 
 function MonitorService:drawFreeSlots()
-    local y = self.height - 14
+    local y = self.height - 17
 
-    -- Build entire line
-    local freeSlotsText = string.format("Free Slots: %d", self.freeSlots)
-    local startX = math.max(0, math.floor((self.width - #freeSlotsText) / 2))
-    local line = string.rep(" ", startX) .. freeSlotsText .. string.rep(" ", self.width - startX - #freeSlotsText)
+    -- Calculate total slots and usage percentage
+    local totalSlots = 0
+    local usedSlots = 0
 
-    self.monitor.setCursorPos(1, y)
+    if self.context.services and self.context.services.storage then
+        local storageService = self.context.services.storage
+        if storageService.storageMap then
+            for _, storage in ipairs(storageService.storageMap) do
+                if not storage.isME then
+                    local inv = peripheral.wrap(storage.name)
+                    if inv and inv.size then
+                        totalSlots = totalSlots + inv.size()
+                    end
+                end
+            end
+        end
+    end
+
+    usedSlots = totalSlots - self.freeSlots
+    local freePercent = totalSlots > 0 and math.floor((self.freeSlots / totalSlots) * 100) or 0
+    local usedPercent = 100 - freePercent
+
+    -- Build progress bar
+    local barWidth = self.width - 4  -- Leave 2 chars padding on each side
+    local usedWidth = math.floor((usedPercent / 100) * barWidth)
+    local freeWidth = barWidth - usedWidth
+
+    -- Build the text to overlay
+    local overlayText = string.format("Free space remaining: %d%%", freePercent)
+    local textStartX = math.floor((self.width - #overlayText) / 2) + 1
+
+    -- Draw the progress bar with text overlay
+    self.monitor.setCursorPos(3, y)
+
+    for i = 1, barWidth do
+        local globalX = i + 2  -- Account for 2-char left padding
+        local charInText = globalX >= textStartX and globalX < textStartX + #overlayText
+        local textChar = charInText and overlayText:sub(globalX - textStartX + 1, globalX - textStartX + 1) or nil
+
+        if i <= usedWidth then
+            -- Red (used) portion
+            self.monitor.setBackgroundColor(colors.red)
+            self.monitor.setTextColor(colors.white)
+            self.monitor.write(textChar or "\127")  -- Full block character
+        else
+            -- Green (free) portion
+            self.monitor.setBackgroundColor(colors.lime)
+            self.monitor.setTextColor(colors.black)
+            self.monitor.write(textChar or "\127")  -- Full block character
+        end
+    end
+
     self.monitor.setBackgroundColor(colors.black)
-    self.monitor.setTextColor(colors.gray)
-    self.monitor.write(line)
 end
 
 function MonitorService:drawPagination()
@@ -615,7 +662,7 @@ function MonitorService:drawPagination()
 
     -- Calculate items per page dynamically based on available rows
     local startY = 3
-    local endY = self.height - 14
+    local endY = self.height - 19
     local maxRows = endY - startY + 1
     local itemsPerPage = maxRows * 2  -- Two columns
 
@@ -623,8 +670,8 @@ function MonitorService:drawPagination()
 
     if totalPages <= 1 then return end
 
-    -- Draw pagination at height - 12
-    local paginationY = self.height - 12
+    -- Draw pagination at height - 13
+    local paginationY = self.height - 13
 
     -- Build simple, clean pagination string
     local paginationStr = string.format("Page %d/%d", self.currentPage, totalPages)
@@ -694,7 +741,7 @@ function MonitorService:drawItemList(items, startY)
 
     for i, item in ipairs(items) do
         local y = startY + i - 1
-        if y > self.height - 12 then break end
+        if y > self.height - 19 then break end
 
         self.monitor.setCursorPos(1, y)
 
@@ -764,7 +811,7 @@ function MonitorService:drawVisualizer()
     end
     totalWidth = totalWidth - 2
 
-    local startX = math.floor((self.width - totalWidth) / 2) - 1
+    local startX = math.floor((self.width - totalWidth) / 2)
     local x = startX
 
     -- Build each pool in memory
@@ -811,52 +858,162 @@ function MonitorService:drawVisualizer()
         x = x + (#pool.workers * 2) + 2
     end
 
-    -- Draw all rows at once
+    -- Draw all rows with colors
     for i = 1, 10 do
         local y = startY + i - 1
         self.monitor.setCursorPos(1, y)
         self.monitor.setBackgroundColor(colors.black)
 
-        local line = ""
+        -- Draw each character with its color
         for j = 1, self.width do
-            line = line .. rows[i][j].char
+            local cell = rows[i][j]
+            self.monitor.setTextColor(cell.color)
+            self.monitor.write(cell.char)
         end
-        self.monitor.setTextColor(colors.white)
-        self.monitor.write(line)
     end
 end
 
 function MonitorService:drawIOIndicators()
     local y = self.height
 
-    -- Build entire bottom line in memory
-    local chars = {}
-    for i = 1, self.width do chars[i] = " " end
-
-    -- Place INPUT at correct position
-    local inputText = "INPUT"
-    local inputPos = self.inputSide == "left" and 1 or (self.width - 5)
-    for i = 1, #inputText do
-        if inputPos + i - 1 >= 1 and inputPos + i - 1 <= self.width then
-            chars[inputPos + i - 1] = inputText:sub(i, i)
-        end
-    end
-
-    -- Place OUTPUT at correct position
-    local outputText = "OUTPUT"
-    local outputPos = self.outputSide == "left" and 1 or (self.width - 6)
-    for i = 1, #outputText do
-        if outputPos + i - 1 >= 1 and outputPos + i - 1 <= self.width then
-            chars[outputPos + i - 1] = outputText:sub(i, i)
-        end
-    end
-
-    -- Write entire line at once
-    local line = table.concat(chars)
+    -- Clear the line
     self.monitor.setCursorPos(1, y)
     self.monitor.setBackgroundColor(colors.black)
+    self.monitor.write(string.rep(" ", self.width))
+
+    -- Write INPUT in green
+    local inputText = "INPUT"
+    local inputPos = self.inputSide == "left" and 1 or (self.width - 5)
+    self.monitor.setCursorPos(inputPos, y)
+    self.monitor.setTextColor(colors.lime)
+    self.monitor.write(inputText)
+
+    -- Write OUTPUT in red
+    local outputText = "OUTPUT"
+    local outputPos = self.outputSide == "left" and 1 or (self.width - 6)
+    self.monitor.setCursorPos(outputPos, y)
+    self.monitor.setTextColor(colors.red)
+    self.monitor.write(outputText)
+end
+
+function MonitorService:drawStatsModal()
+    -- Calculate modal dimensions (centered, 60% width, same height as items list)
+    local modalWidth = math.floor(self.width * 0.6)
+    -- Items go from line 3 to height-19, so height is (height-19) - 3 + 1 = height-21
+    local modalHeight = self.height - 21
+    local startX = math.floor((self.width - modalWidth) / 2)
+    local startY = 3  -- Align with items list start
+
+    -- Get stats data
+    local items = self:getAllItems()
+    local uniqueCount = #items
+    local totalCount = 0
+    for _, item in ipairs(items) do
+        totalCount = totalCount + (item.value.count or 0)
+    end
+
+    local inventoryCount = 0
+    local bufferChest = "None"
+    if self.context.services and self.context.services.storage then
+        local storageService = self.context.services.storage
+        if storageService.storageMap then
+            inventoryCount = #storageService.storageMap
+        end
+        if storageService.bufferChest then
+            bufferChest = storageService.bufferChest
+        end
+    end
+
+    local totalSlots = self.freeSlots + 0  -- Calculate total from current state
+    -- Need to get used slots
+    local usedSlots = 0
+    if self.context.services and self.context.services.storage then
+        local storageService = self.context.services.storage
+        if storageService.storageMap then
+            for _, storage in ipairs(storageService.storageMap) do
+                if not storage.isME then
+                    local inv = peripheral.wrap(storage.name)
+                    if inv and inv.list and inv.size then
+                        local items = inv.list()
+                        totalSlots = totalSlots + inv.size()
+                        for _ in pairs(items) do
+                            usedSlots = usedSlots + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local freePercent = totalSlots > 0 and math.floor((self.freeSlots / totalSlots) * 100) or 0
+
+    -- Draw modal background
+    for y = startY, startY + modalHeight - 1 do
+        self.monitor.setCursorPos(startX, y)
+        self.monitor.setBackgroundColor(colors.gray)
+        self.monitor.write(string.rep(" ", modalWidth))
+    end
+
+    -- Draw modal border
+    self.monitor.setCursorPos(startX, startY)
+    self.monitor.setBackgroundColor(colors.lightGray)
+    self.monitor.setTextColor(colors.black)
+    self.monitor.write(string.rep(" ", modalWidth))
+    self.monitor.setCursorPos(startX + 2, startY)
+    self.monitor.write("STORAGE STATISTICS")
+
+    -- Close button
+    local closeText = "[X]"
+    self.monitor.setCursorPos(startX + modalWidth - 4, startY)
+    self.monitor.setTextColor(colors.red)
+    self.monitor.write(closeText)
+
+    -- Draw stats content
+    local contentY = startY + 2
+    local contentX = startX + 2
+
+    self.monitor.setBackgroundColor(colors.gray)
     self.monitor.setTextColor(colors.white)
-    self.monitor.write(line)
+
+    -- Total items
+    self.monitor.setCursorPos(contentX, contentY)
+    self.monitor.write(string.format("Total Items: %d", totalCount))
+    contentY = contentY + 1
+
+    -- Unique items
+    self.monitor.setCursorPos(contentX, contentY)
+    self.monitor.write(string.format("Unique Items: %d", uniqueCount))
+    contentY = contentY + 1
+
+    -- Inventories connected
+    self.monitor.setCursorPos(contentX, contentY)
+    self.monitor.write(string.format("Inventories Connected: %d", inventoryCount))
+    contentY = contentY + 1
+
+    -- Buffer chest
+    self.monitor.setCursorPos(contentX, contentY)
+    self.monitor.write(string.format("Buffer Chest: %s", bufferChest))
+    contentY = contentY + 1
+
+    -- Free slots
+    self.monitor.setCursorPos(contentX, contentY)
+    self.monitor.write(string.format("Free Slots: %d", self.freeSlots))
+    contentY = contentY + 1
+
+    -- Storage capacity
+    self.monitor.setCursorPos(contentX, contentY)
+    self.monitor.write(string.format("Storage: %d / %d", usedSlots, totalSlots))
+    contentY = contentY + 1
+
+    -- Free space percentage
+    self.monitor.setCursorPos(contentX, contentY)
+    self.monitor.write(string.format("Free Space: %d%%", freePercent))
+    contentY = contentY + 2
+
+    -- Close instruction
+    self.monitor.setCursorPos(contentX, contentY)
+    self.monitor.setTextColor(colors.lightGray)
+    self.monitor.write("Click [X] to close")
 end
 
 function MonitorService:initializeVisualizer()
@@ -1100,7 +1257,27 @@ function MonitorService:getAllItems()
     -- PURE FUNCTION - Only reads from cache, no expensive operations
     -- Cache is updated by background thread
 
-    local items = self.itemCache
+    -- Deduplicate items by key (keep first occurrence only)
+    local itemMap = {}
+    for _, item in ipairs(self.itemCache) do
+        if not itemMap[item.key] then
+            -- First occurrence, store a copy
+            itemMap[item.key] = {
+                key = item.key,
+                value = {
+                    count = item.value.count or 0,
+                    stackSize = item.value.stackSize or 64
+                }
+            }
+        end
+        -- If duplicate, skip it (don't aggregate counts)
+    end
+
+    -- Convert map back to array
+    local items = {}
+    for _, item in pairs(itemMap) do
+        table.insert(items, item)
+    end
 
     -- Sort items
     table.sort(items, function(a, b)
@@ -1142,9 +1319,50 @@ end
 function MonitorService:handleClick(x, y)
     local changed = false
 
-    -- Header: Sort buttons
+    -- If stats modal is open, handle modal clicks
+    if self.showStatsModal then
+        local modalWidth = math.floor(self.width * 0.6)
+        local modalHeight = self.height - 21
+        local startX = math.floor((self.width - modalWidth) / 2)
+        local startY = 3
+
+        -- Close button click (top right of modal)
+        if y == startY and x >= startX + modalWidth - 4 and x <= startX + modalWidth - 1 then
+            self.showStatsModal = false
+            -- Clear screen and mark everything dirty to refresh display
+            self.monitor.setBackgroundColor(colors.black)
+            self.dirty.header = true
+            self.dirty.lists = true
+            self.dirty.freeSlots = true
+            self.dirty.pagination = true
+            return
+        end
+
+        -- Click outside modal closes it
+        if x < startX or x >= startX + modalWidth or y < startY or y >= startY + modalHeight then
+            self.showStatsModal = false
+            -- Clear screen and mark everything dirty to refresh display
+            self.monitor.setBackgroundColor(colors.black)
+            self.dirty.header = true
+            self.dirty.lists = true
+            self.dirty.freeSlots = true
+            self.dirty.pagination = true
+            return
+        end
+
+        -- Ignore clicks inside modal (except close button)
+        return
+    end
+
+    -- Header: Stats link and Sort buttons
     if y == 1 then
-        local sortX = self.width - 18
+        -- Stats link (around position 12-18 for "[Stats]")
+        if x >= 12 and x <= 18 then
+            self.showStatsModal = true
+            return
+        end
+
+        local sortX = self.width - 19
         -- Name sort button (positions sortX+6 to sortX+11)
         if x >= sortX + 6 and x <= sortX + 11 then
             if self.sortBy ~= "name" then
@@ -1160,8 +1378,8 @@ function MonitorService:handleClick(x, y)
         end
     end
 
-    -- Letter navigation (now at height - 13, centered)
-    local letterFilterY = self.height - 13
+    -- Letter navigation (now at height - 15, centered)
+    local letterFilterY = self.height - 15
     if y == letterFilterY then
         if self.currentLetter then
             -- Click [X] to go back (centered position)
@@ -1193,25 +1411,40 @@ function MonitorService:handleClick(x, y)
     end
 
     -- Pagination clicks
-    local paginationY = self.height - 12
+    local paginationY = self.height - 13
     if y == paginationY then
         local items = self.currentLetter and self:getFilteredItems() or self:getAllItems()
 
         -- Calculate items per page dynamically
         local startY = 3
-        local endY = self.height - 14
+        local endY = self.height - 19
         local maxRows = endY - startY + 1
         local itemsPerPage = maxRows * 2  -- Two columns
         local totalPages = math.ceil(#items / itemsPerPage)
 
         -- Check if pagination is being displayed
         if totalPages > 1 then
-            -- Previous page (left side, clicking "<")
-            if x <= 5 and self.currentPage > 1 then
+            -- Build pagination string to calculate positions
+            local paginationStr = string.format("Page %d/%d", self.currentPage, totalPages)
+            local hasLeft = self.currentPage > 1
+            local hasRight = self.currentPage < totalPages
+
+            if hasLeft and hasRight then
+                paginationStr = "< " .. paginationStr .. " >"
+            elseif hasLeft then
+                paginationStr = "< " .. paginationStr
+            elseif hasRight then
+                paginationStr = paginationStr .. " >"
+            end
+
+            local startX = math.max(0, math.floor((self.width - #paginationStr) / 2))
+
+            -- Previous page (clicking on "<")
+            if hasLeft and x >= startX and x <= startX + 1 then
                 self.currentPage = self.currentPage - 1
                 changed = true
-            -- Next page (right side, clicking ">")
-            elseif x >= self.width - 5 and self.currentPage < totalPages then
+            -- Next page (clicking on ">")
+            elseif hasRight and x >= startX + #paginationStr - 1 and x <= startX + #paginationStr then
                 self.currentPage = self.currentPage + 1
                 changed = true
             end
