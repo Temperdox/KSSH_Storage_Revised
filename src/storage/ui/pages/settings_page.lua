@@ -249,7 +249,7 @@ function SettingsPage:setSettingValue(id, value)
 end
 
 function SettingsPage:saveSettings()
-    local settingsPath = "/storage/cfg/settings.json"
+    local settingsPath = "/cfg/settings.json"
     local file = fs.open(settingsPath, "w")
 
     if file then

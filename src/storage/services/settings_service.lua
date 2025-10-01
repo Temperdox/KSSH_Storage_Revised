@@ -78,7 +78,7 @@ function SettingsService:save()
         end
     else
         -- Fallback to local filesystem
-        local file = fs.open("/storage/cfg/settings.json", "w")
+        local file = fs.open("/cfg/settings.json", "w")
         if file then
             file.write(serialized)
             file.close()
@@ -103,7 +103,7 @@ function SettingsService:load()
         end
     else
         -- Fallback to local filesystem
-        local settingsFile = "/storage/cfg/settings.json"
+        local settingsFile = "/cfg/settings.json"
         if fs.exists(settingsFile) then
             local file = fs.open(settingsFile, "r")
             local content = file.readAll()

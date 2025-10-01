@@ -34,7 +34,7 @@ function ThemeCommand.register(factory, context)
             context.settings.theme = themeName
 
             -- Save settings
-            local settingsPath = "/storage/cfg/settings.json"
+            local settingsPath = "/cfg/settings.json"
             local file = fs.open(settingsPath, "w")
             if file then
                 local ok, serialized = pcall(textutils.serialiseJSON, context.settings)

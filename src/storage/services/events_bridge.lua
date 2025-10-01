@@ -331,7 +331,7 @@ function EventsBridge:getRecentEvents(count, filter)
 end
 
 function EventsBridge:saveStats()
-    local statsFile = "/storage/data/event_stats.json"
+    local statsFile = "/data/event_stats.json"
     local data = {
         stats = self.stats,
         lastSave = os.epoch("utc")
@@ -353,7 +353,7 @@ function EventsBridge:saveStats()
 end
 
 function EventsBridge:loadStats()
-    local statsFile = "/storage/data/event_stats.json"
+    local statsFile = "/data/event_stats.json"
 
     if not fs.exists(statsFile) then
         return

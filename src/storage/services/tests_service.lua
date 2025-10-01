@@ -2,7 +2,7 @@
 -- TESTS SERVICE
 -- ============================================================================
 
--- /storage/services/tests_service.lua
+-- /services/tests_service.lua
 -- System testing service with various test suites
 
 local TestsService = {}
@@ -960,7 +960,7 @@ function TestsService:getTestResults(testName)
 end
 
 function TestsService:saveTestArtifact(testName, result)
-    local filename = string.format("/storage/logs/test-%s-%s.log",
+    local filename = string.format("/logs/test-%s-%s.log",
             testName, os.date("%Y%m%d-%H%M%S"))
 
     local file = fs.open(filename, "w")
@@ -982,7 +982,7 @@ function TestsService:saveTestArtifact(testName, result)
 end
 
 function TestsService:loadTestResults()
-    local resultsFile = "/storage/data/test_results.json"
+    local resultsFile = "/data/test_results.json"
 
     if fs.exists(resultsFile) then
         local file = fs.open(resultsFile, "r")
@@ -998,7 +998,7 @@ function TestsService:loadTestResults()
 end
 
 function TestsService:saveTestResults()
-    local resultsFile = "/storage/data/test_results.json"
+    local resultsFile = "/data/test_results.json"
 
     local data = {
         results = self.testResults,

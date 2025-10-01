@@ -1,4 +1,4 @@
--- /storage/core/logger.lua
+-- /core/logger.lua
 -- Optimized logger that only logs important events and errors
 
 local Logger = {}
@@ -9,11 +9,11 @@ function Logger:new(eventBus, level, fileLevel)
     o.eventBus = eventBus
     o.levels = {trace = 1, debug = 2, info = 3, warn = 4, error = 5, critical = 6}
     o.level = o.levels[level] or 4  -- Default to WARN level for console
-    o.fileLevel = o.levels[fileLevel or "warn"] or 4  -- Default to WARN level for file
+    o.fileLevel = 1  -- TRACE LEVEL - SAVE EVERYTHING TO DISK!
     o.ringBuffer = {}
     o.maxRingSize = 100  -- Reduced from 1000
     o.diskManager = nil  -- Will be set by startup
-    o.basePath = "/storage/logs"  -- Fallback path if no disk manager
+    o.basePath = "/logs"  -- Fallback path if no disk manager
 
     -- Events to completely ignore (too noisy)
     o.ignoredEvents = {
@@ -58,6 +58,18 @@ function Logger:shouldLog(level, source, message, forFile)
         return false
     end
 
+    -- For file logging, save EVERYTHING except completely ignored events
+    if forFile then
+        -- Only check ignored events for file logging
+        for _, ignored in ipairs(self.ignoredEvents) do
+            if source == ignored or source:match("^" .. ignored:gsub("%.", "%%.")) then
+                return false
+            end
+        end
+        return true  -- Save everything else to file
+    end
+
+    -- For console logging, apply all filters
     -- Check if source is an ignored event
     for _, ignored in ipairs(self.ignoredEvents) do
         if source == ignored or source:match("^" .. ignored:gsub("%.", "%%.")) then
@@ -131,16 +143,30 @@ function Logger:log(level, source, message, data)
         end
 
         if self.diskManager then
-            -- Use disk manager for automatic failover
+            -- Use disk manager for automatic failover to disk drives on wired network
             local levelFilename = string.format("app_%s-%s.log", level, date)
             local combinedFilename = string.format("app_all-%s.log", date)
 
             -- Write to level-specific log
-            self.diskManager:appendFile("logs", levelFilename, logLine)
+            local ok1, err1 = pcall(function()
+                self.diskManager:appendFile("logs", levelFilename, logLine)
+            end)
 
             -- Write to combined log
-            self.diskManager:appendFile("logs", combinedFilename, logLine)
+            local ok2, err2 = pcall(function()
+                self.diskManager:appendFile("logs", combinedFilename, logLine)
+            end)
+
+            -- If first log write failed, print error
+            if not ok1 and level == "error" then
+                print("[LOGGER ERROR] Failed to write to disk: " .. tostring(err1))
+            end
         else
+            -- NO DISK MANAGER - CRITICAL ERROR
+            if level == "error" or level == "critical" then
+                print("[LOGGER CRITICAL] NO DISK MANAGER SET - LOGS NOT BEING SAVED!")
+            end
+
             -- Fallback to local filesystem
             local filename = string.format("%s/app_%s-%s.log", self.basePath, level, date)
             local file = fs.open(filename, "a")

@@ -1,4 +1,4 @@
--- /storage/core/disk_manager.lua
+-- /core/disk_manager.lua
 -- Manages network-connected disk drives for data, config, and log storage
 
 local DiskManager = {}

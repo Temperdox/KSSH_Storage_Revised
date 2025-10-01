@@ -647,7 +647,7 @@ end
 
 function StatsPage:loadStats()
     -- Load uptime data
-    local uptimeFile = "/storage/cfg/uptime.json"
+    local uptimeFile = "/cfg/uptime.json"
     if fs.exists(uptimeFile) then
         local file = fs.open(uptimeFile, "r")
         local content = file.readAll()

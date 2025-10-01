@@ -10,7 +10,6 @@ function StorageService:new(context)
     o.scheduler = context.scheduler
     o.logger = context.logger
     o.storageMap = context.storageMap  -- All discovered storages
-    o.bufferInventory = nil  -- DON'T ASSIGN YET!
 
     -- Auto-discovery state
     o.discoveryMode = false
@@ -19,7 +18,7 @@ function StorageService:new(context)
 
     -- Initialize item index
     o.itemIndex = HashOA_RRSC:new(context.eventBus)
-    o.itemIndex:load("/storage/data/item_index.dat")
+    o.itemIndex:load("/data/item_index.dat")
 
     -- Get wired modem
     o.modem = peripheral.find("modem", function(name, p)
@@ -32,7 +31,7 @@ function StorageService:new(context)
     end
 
     -- Check for existing configuration
-    local configPath = "/storage/cfg/io_config.json"
+    local configPath = "/cfg/io_config.json"
     if fs.exists(configPath) then
         local file = fs.open(configPath, "r")
         local config = textutils.unserialiseJSON(file.readAll())
@@ -40,7 +39,6 @@ function StorageService:new(context)
 
         o.inputConfig = config.input
         o.outputConfig = config.output
-        o.bufferInventory = config.buffer
         o.logger:info("StorageService", "Loaded I/O configuration")
         o.logger:info("StorageService", "Input: " .. o.inputConfig.networkId .. " (side: " .. o.inputConfig.side .. ")")
         o.logger:info("StorageService", "Output: " .. o.outputConfig.networkId .. " (side: " .. o.outputConfig.side .. ")")
@@ -56,16 +54,27 @@ end
 function StorageService:start()
     self.running = true
 
+    self.logger:warn("StorageService", "============================================================")
+    self.logger:warn("StorageService", "STORAGE SERVICE START() CALLED")
+    self.logger:warn("StorageService", string.format("Discovery mode: %s", tostring(self.discoveryMode)))
+    self.logger:warn("StorageService", "============================================================")
+
     -- ALWAYS rebuild index immediately on startup, regardless of discovery mode
     self.logger:info("StorageService", "Building initial index from all inventories...")
     self:rebuildIndexAllInventories()
 
     if self.discoveryMode then
-        self.logger:info("StorageService", "Starting auto-discovery for input/output...")
+        self.logger:warn("StorageService", "!!!! IN DISCOVERY MODE !!!!")
+        self.logger:info("StorageService", "Discovery will trigger when:")
+        self.logger:info("StorageService", "  1. You click to withdraw an item on the monitor")
+        self.logger:info("StorageService", "  2. You place items in a chest next to the computer")
+
+        -- Start simple periodic check for manual item insertion
         self.scheduler:submit("io", function()
-            self:runDiscovery()
+            self:checkForManualInsertion()
         end)
     else
+        self.logger:warn("StorageService", "!!!! IN NORMAL MODE - STARTING ALL MONITORING THREADS !!!!")
         -- Normal operation
         self:initializePeripherals()
 
@@ -75,10 +84,6 @@ function StorageService:start()
             self:monitorInput()
         end, "input_monitor")
 
-        self.scheduler:submit("io", function()
-            self:processBuffer()
-        end, "buffer_process")
-
         -- Start periodic sync to monitor service
         self.logger:info("StorageService", "Submitting syncToMonitor task...")
         self.scheduler:submit("io", function()
@@ -86,110 +91,142 @@ function StorageService:start()
             self:syncToMonitor()
         end, "monitor_sync")
 
+        -- Start active storage monitoring to detect manual changes
+        self.logger:warn("StorageService", "========================================")
+        self.logger:warn("StorageService", "SUBMITTING STORAGE MONITOR TASK TO IO POOL")
+        self.logger:warn("StorageService", "========================================")
+        self.scheduler:submit("io", function()
+            self.logger:warn("StorageService", ">>>>>>>>>> STORAGE MONITOR THREAD STARTED <<<<<<<<<<")
+            self:monitorStorageChanges()
+        end, "storage_monitor")
+
         self.logger:info("StorageService", "All IO tasks submitted")
     end
 
-    -- Subscribe to events
+    -- Subscribe to events (allow withdrawals in discovery mode for auto-discovery)
     self.eventBus:subscribe("storage.withdraw", function(event, data)
-        if not self.discoveryMode then
-            self:withdraw(data.itemName, data.count)
-        end
+        self:withdraw(data.itemName, data.count)
     end)
 
     self.logger:info("StorageService", "Service started")
 end
 
-function StorageService:runDiscovery()
-    self.logger:info("Discovery", "=== AUTO-DISCOVERY MODE ===")
-    self.logger:info("Discovery", "Please insert items into any chest...")
+-- Simple periodic check for manual item insertion
+function StorageService:checkForManualInsertion()
+    self.logger:info("Discovery", "========================================")
+    self.logger:info("Discovery", "AUTOMATIC DISCOVERY")
+    self.logger:info("Discovery", "========================================")
+    self.logger:info("Discovery", "Place ONE item in a chest on LEFT or RIGHT side")
+    self.logger:info("Discovery", "The chest with the item = INPUT")
+    self.logger:info("Discovery", "System will auto-detect OUTPUT on opposite side")
 
-    -- Step 1: Wait for items to appear anywhere
-    local lastState = self:captureAllInventoryState()
-    local inputFound = false
+    local lastCheck = {}
 
-    while not inputFound and self.running do
+    while self.running and self.discoveryMode do
         os.sleep(0.5)
-        local currentState = self:captureAllInventoryState()
 
-        -- Find what changed
-        for networkId, currentItems in pairs(currentState) do
-            local lastItems = lastState[networkId] or {}
+        -- Check all networked inventories for new items
+        for _, name in ipairs(self.modem.getNamesRemote()) do
+            local pType = peripheral.getType(name)
+            if pType and (pType:find("chest") or pType:find("barrel") or pType:find("shulker")) then
+                local inv = peripheral.wrap(name)
+                if inv and inv.list then
+                    local items = inv.list()
+                    local currentCount = 0
+                    for _ in pairs(items) do
+                        currentCount = currentCount + 1
+                    end
 
-            -- Check if items were added
-            if self:hasNewItems(lastItems, currentItems) then
-                self.logger:info("Discovery", "Items detected in: " .. networkId)
+                    local lastCount = lastCheck[name] or 0
 
-                -- Step 2: Check if computer can see these items on left or right
-                local detectedSide = nil
+                    -- New items detected in previously empty chest
+                    if currentCount > 0 and lastCount == 0 then
+                        self.logger:info("Discovery", "========================================")
+                        self.logger:info("Discovery", "Items detected in: " .. name)
 
-                -- Check left side
-                if peripheral.isPresent("left") then
-                    local leftInv = peripheral.wrap("left")
-                    if leftInv and leftInv.list then
-                        local leftItems = leftInv.list()
-                        if self:inventoriesMatch(leftItems, currentItems) then
-                            detectedSide = "left"
+                        -- Get first item
+                        local _, firstItem = next(items)
+                        if firstItem then
+                            self.logger:info("Discovery", "Test item: " .. firstItem.name)
+                            self:discoverFromItemNetworked(firstItem.name, name)
+                            return
                         end
                     end
+
+                    lastCheck[name] = currentCount
                 end
+            end
+        end
+    end
+end
 
-                -- Check right side
-                if not detectedSide and peripheral.isPresent("right") then
-                    local rightInv = peripheral.wrap("right")
-                    if rightInv and rightInv.list then
-                        local rightItems = rightInv.list()
-                        if self:inventoriesMatch(rightItems, currentItems) then
-                            detectedSide = "right"
-                        end
-                    end
-                end
+-- Discovery by moving item to networked chests and checking which appears on opposite side
+function StorageService:discoverFromItemNetworked(itemName, inputNetworkId)
+    self.logger:info("Discovery", "=== STARTING DISCOVERY ===")
+    self.logger:info("Discovery", "Input chest: " .. inputNetworkId)
+    self.logger:info("Discovery", "Test item: " .. itemName)
 
-                if detectedSide then
-                    self.logger:info("Discovery", "INPUT FOUND!")
-                    self.logger:info("Discovery", "Network ID: " .. networkId)
-                    self.logger:info("Discovery", "Computer Side: " .. detectedSide)
-
-                    self.inputConfig = {
-                        side = detectedSide,
-                        networkId = networkId
-                    }
-
-                    inputFound = true
-
-                    -- Now discover output
-                    self:discoverOutput(networkId, currentItems)
+    -- Determine which side this input chest is on
+    local inputSide = nil
+    if peripheral.isPresent("left") then
+        local leftInv = peripheral.wrap("left")
+        if leftInv and leftInv.list then
+            local leftItems = leftInv.list()
+            for _, item in pairs(leftItems) do
+                if item.name == itemName then
+                    inputSide = "left"
                     break
                 end
             end
         end
-
-        lastState = currentState
     end
-end
 
-function StorageService:discoverOutput(inputNetworkId, inputItems)
-    self.logger:info("Discovery", "Searching for output chest...")
+    if not inputSide and peripheral.isPresent("right") then
+        local rightInv = peripheral.wrap("right")
+        if rightInv and rightInv.list then
+            local rightItems = rightInv.list()
+            for _, item in pairs(rightItems) do
+                if item.name == itemName then
+                    inputSide = "right"
+                    break
+                end
+            end
+        end
+    end
 
-    -- Get the first item to test with
-    local testSlot, testItem = next(inputItems)
-    if not testSlot or not testItem then
-        self.logger:error("Discovery", "No items to test with!")
+    if not inputSide then
+        self.logger:error("Discovery", "Could not determine which side input chest is on!")
         return
     end
 
-    self.logger:info("Discovery", "Testing with: " .. testItem.name)
+    self.logger:info("Discovery", "Input is on " .. inputSide .. " side")
 
-    -- Get input inventory using network ID
+    local oppositeSide = (inputSide == "left") and "right" or "left"
+    self.logger:info("Discovery", "Looking for output on " .. oppositeSide .. " side")
+
+    -- Get the input inventory
     local inputInv = peripheral.wrap(inputNetworkId)
     if not inputInv then
-        self.logger:error("Discovery", "Failed to wrap input inventory!")
+        self.logger:error("Discovery", "Failed to wrap input inventory")
         return
     end
 
-    -- Get opposite side for output
-    local expectedOutputSide = (self.inputConfig.side == "left") and "right" or "left"
+    -- Find the test item slot
+    local testSlot = nil
+    local items = inputInv.list()
+    for slot, item in pairs(items) do
+        if item.name == itemName then
+            testSlot = slot
+            break
+        end
+    end
 
-    -- Get all network inventories except input
+    if not testSlot then
+        self.logger:error("Discovery", "Test item not found in input chest")
+        return
+    end
+
+    -- Get all OTHER networked inventories to test
     local testInventories = {}
     for _, name in ipairs(self.modem.getNamesRemote()) do
         if name ~= inputNetworkId then
@@ -200,112 +237,94 @@ function StorageService:discoverOutput(inputNetworkId, inputItems)
         end
     end
 
-    self.logger:info("Discovery", "Found " .. #testInventories .. " inventories to test")
+    self.logger:info("Discovery", "Testing " .. #testInventories .. " chests for output")
 
-    -- Test each inventory
+    local outputNetworkId = nil
+
+    -- Test each chest - check if item appears on OPPOSITE side
     for _, targetNetworkId in ipairs(testInventories) do
         self.logger:info("Discovery", "Testing: " .. targetNetworkId)
 
-        -- Move ONE item using network IDs
+        -- Push item to test inventory
         local moved = inputInv.pushItems(targetNetworkId, testSlot, 1)
 
-        if moved and moved > 0 then
-            -- Check if the opposite side now has the item
-            os.sleep(0.2)  -- Small delay to ensure transfer completes
+        if moved > 0 then
+            self.logger:info("Discovery", "Moved item to " .. targetNetworkId)
+            os.sleep(0.3)
 
-            if peripheral.isPresent(expectedOutputSide) then
-                local sideInv = peripheral.wrap(expectedOutputSide)
-                if sideInv and sideInv.list then
-                    local sideItems = sideInv.list()
-
-                    -- Check if the item appeared on this side
-                    for slot, item in pairs(sideItems) do
-                        if item.name == testItem.name then
-                            self.logger:info("Discovery", "OUTPUT FOUND!")
-                            self.logger:info("Discovery", "Network ID: " .. targetNetworkId)
-                            self.logger:info("Discovery", "Computer Side: " .. expectedOutputSide)
-
-                            self.outputConfig = {
-                                side = expectedOutputSide,
-                                networkId = targetNetworkId
-                            }
-
-                            -- Move item back to input
-                            local targetInv = peripheral.wrap(targetNetworkId)
-                            targetInv.pushItems(inputNetworkId, slot, 1)
-
-                            -- Now assign buffer and save config
-                            self:assignBufferAndSave()
-                            return
+            -- Check if item appeared on opposite side
+            if peripheral.isPresent(oppositeSide) then
+                local oppInv = peripheral.wrap(oppositeSide)
+                if oppInv and oppInv.list then
+                    local oppItems = oppInv.list()
+                    for _, item in pairs(oppItems) do
+                        if item.name == itemName then
+                            -- FOUND IT!
+                            self.logger:info("Discovery", "OUTPUT FOUND: " .. targetNetworkId)
+                            self.logger:info("Discovery", "Item appeared on " .. oppositeSide .. " side!")
+                            outputNetworkId = targetNetworkId
+                            break
                         end
                     end
                 end
             end
 
-            -- Not the output, move item back
-            local targetInv = peripheral.wrap(targetNetworkId)
-            if targetInv then
-                -- Find where the item went
-                local targetItems = targetInv.list()
-                for slot, item in pairs(targetItems) do
-                    if item.name == testItem.name then
-                        targetInv.pushItems(inputNetworkId, slot, 1)
-                        break
+            if outputNetworkId then
+                break
+            else
+                -- Not the output, move item back
+                self.logger:info("Discovery", "Not output, moving item back...")
+                local targetInv = peripheral.wrap(targetNetworkId)
+                if targetInv then
+                    local targetItems = targetInv.list()
+                    for slot, item in pairs(targetItems) do
+                        if item.name == itemName then
+                            targetInv.pushItems(inputNetworkId, slot, 1)
+                            os.sleep(0.2)
+                            break
+                        end
                     end
                 end
             end
         end
 
-        os.sleep(0.1)  -- Small delay between tests
+        os.sleep(0.1)
     end
 
-    self.logger:error("Discovery", "Could not find output chest!")
-end
-
-function StorageService:assignBufferAndSave()
-    self.logger:info("Discovery", "Assigning buffer from remaining storages...")
-
-    -- Find the largest remaining storage for buffer
-    local largestSize = 0
-    local largestId = nil
-
-    for _, name in ipairs(self.modem.getNamesRemote()) do
-        -- Skip input and output
-        if name ~= self.inputConfig.networkId and name ~= self.outputConfig.networkId then
-            local pType = peripheral.getType(name)
-            if pType and (pType:find("chest") or pType:find("barrel") or pType:find("shulker")) then
-                local inv = peripheral.wrap(name)
-                if inv and inv.size then
-                    local size = inv.size()
-                    if size > largestSize then
-                        largestSize = size
-                        largestId = name
-                    end
-                end
-            end
-        end
-    end
-
-    if largestId then
-        self.bufferInventory = {
-            name = largestId,
-            size = largestSize
-        }
-        self.logger:info("Discovery", "Buffer assigned: " .. largestId .. " (" .. largestSize .. " slots)")
-    else
-        self.logger:error("Discovery", "No suitable buffer found!")
+    if not outputNetworkId then
+        self.logger:error("Discovery", "Could not find output chest on " .. oppositeSide .. " side!")
         return
     end
 
     -- Save configuration
+    self.inputConfig = {
+        side = inputSide,
+        networkId = inputNetworkId
+    }
+
+    self.outputConfig = {
+        side = oppositeSide,
+        networkId = outputNetworkId
+    }
+
+    self.logger:info("Discovery", "========================================")
+    self.logger:info("Discovery", "CONFIGURATION COMPLETE")
+    self.logger:info("Discovery", "Input (" .. inputSide .. "): " .. inputNetworkId)
+    self.logger:info("Discovery", "Output (" .. oppositeSide .. "): " .. outputNetworkId)
+    self.logger:info("Discovery", "========================================")
+
+    self:saveConfigAndStart()
+end
+
+function StorageService:saveConfigAndStart()
+    -- Save configuration (NO BUFFER NEEDED)
     local config = {
         input = self.inputConfig,
         output = self.outputConfig,
-        buffer = self.bufferInventory,
         timestamp = os.epoch("utc")
     }
 
-    local file = fs.open("/storage/cfg/io_config.json", "w")
+    local file = fs.open("/cfg/io_config.json", "w")
     local ok, json = pcall(textutils.serialiseJSON, config)
 
     if not ok then
@@ -325,171 +344,83 @@ function StorageService:assignBufferAndSave()
     self:initializePeripherals()
     self:rebuildIndex()
 
-    -- Start monitoring
+    -- Start input monitoring (moves directly to storage, no buffer)
     self.scheduler:submit("io", function()
         self:monitorInput()
     end, "input_monitor")
-
-    self.scheduler:submit("io", function()
-        self:processBuffer()
-    end, "buffer_process")
 
     -- Start periodic sync to monitor service
     self.scheduler:submit("io", function()
         self:syncToMonitor()
     end, "monitor_sync")
-end
 
-function StorageService:captureAllInventoryState()
-    local state = {}
-
-    -- Capture all network inventories
-    for _, name in ipairs(self.modem.getNamesRemote()) do
-        local pType = peripheral.getType(name)
-        if pType and (pType:find("chest") or pType:find("barrel") or pType:find("shulker")) then
-            local inv = peripheral.wrap(name)
-            if inv and inv.list then
-                state[name] = inv.list()
-            end
-        end
-    end
-
-    return state
-end
-
-function StorageService:hasNewItems(oldItems, newItems)
-    -- Count total items
-    local oldCount = 0
-    for _, item in pairs(oldItems) do
-        oldCount = oldCount + item.count
-    end
-
-    local newCount = 0
-    for _, item in pairs(newItems) do
-        newCount = newCount + item.count
-    end
-
-    return newCount > oldCount
-end
-
-function StorageService:inventoriesMatch(inv1, inv2)
-    -- Check if two inventories have the same items
-    local items1 = {}
-    for _, item in pairs(inv1) do
-        items1[item.name] = (items1[item.name] or 0) + item.count
-    end
-
-    local items2 = {}
-    for _, item in pairs(inv2) do
-        items2[item.name] = (items2[item.name] or 0) + item.count
-    end
-
-    -- Compare
-    for name, count in pairs(items1) do
-        if items2[name] ~= count then
-            return false
-        end
-    end
-
-    for name, count in pairs(items2) do
-        if items1[name] ~= count then
-            return false
-        end
-    end
-
-    return true
+    -- Start active storage monitoring
+    self.logger:warn("StorageService", "========================================")
+    self.logger:warn("StorageService", "SUBMITTING STORAGE MONITOR TASK TO IO POOL (DISCOVERY COMPLETE)")
+    self.logger:warn("StorageService", "========================================")
+    self.scheduler:submit("io", function()
+        self.logger:warn("StorageService", ">>>>>>>>>> STORAGE MONITOR THREAD STARTED (DISCOVERY) <<<<<<<<<<")
+        self:monitorStorageChanges()
+    end, "storage_monitor")
 end
 
 function StorageService:initializePeripherals()
-    -- Use network IDs for everything!
+    -- Use network IDs for input/output only (no buffer!)
     self.inputChest = peripheral.wrap(self.inputConfig.networkId)
     self.outputChest = peripheral.wrap(self.outputConfig.networkId)
-    self.buffer = peripheral.wrap(self.bufferInventory.name)
 
     self.logger:info("StorageService", "Peripherals initialized using network IDs")
 end
 
 function StorageService:monitorInput()
+    self.logger:warn("StorageService", ">>>>>>>>>> INPUT MONITOR THREAD STARTED <<<<<<<<<<")
+    self.logger:warn("StorageService", string.format("Input chest: %s", self.inputChest and self.inputConfig.networkId or "NIL"))
+
     while self.running do
-        if self.inputChest and self.buffer then
+        if self.inputChest then
             local ok, items = pcall(function() return self.inputChest.list() end)
             if ok and items and next(items) then
+                self.logger:warn("StorageService", string.format("[INPUT] Found %d items in input chest", self:countItems(items)))
                 for slot, item in pairs(items) do
-                    -- Submit individual task for each item transfer
+                    -- Submit individual task to move directly to storage (NO BUFFER)
                     self.scheduler:submit("io", function()
-                        self:transferInputToBuffer(slot, item)
+                        self:transferInputToStorage(slot, item)
                     end, "input_transfer")
                 end
             end
+        else
+            self.logger:error("StorageService", "[INPUT] Thread cannot run - inputChest is nil")
+            return -- Exit thread if peripheral isn't set
         end
 
         os.sleep(0.5)
     end
 end
 
-function StorageService:transferInputToBuffer(slot, item)
+function StorageService:transferInputToStorage(slot, item)
     self.logger:warn("StorageService", string.format(
-        "[TRANSFER] Starting input transfer: slot=%d, item=%s",
-        slot, item.name
-    ))
-
-    -- Transfer using network IDs only!
-    local moved = self.inputChest.pushItems(self.bufferInventory.name, slot)
-
-    if moved and moved > 0 then
-        self.eventBus:publish("storage.inputReceived", {
-            item = item.name,
-            count = moved,
-            from = "input",
-            to = "buffer"
-        })
-
-        self.logger:warn("StorageService", string.format(
-            "[TRANSFER] Moved %d x %s to buffer",
-            moved, item.name
-        ))
-    else
-        self.logger:warn("StorageService", string.format(
-            "[TRANSFER] Failed to move %s from slot %d",
-            item.name, slot
-        ))
-    end
-end
-
-function StorageService:processBuffer()
-    while self.running do
-        if self.buffer then
-            local ok, items = pcall(function() return self.buffer.list() end)
-            if ok and items and next(items) then
-                for slot, item in pairs(items) do
-                    -- Submit individual task for each item move
-                    self.scheduler:submit("io", function()
-                        self:moveItemToStorage(slot, item)
-                    end, "item_move")
-                end
-            end
-        end
-
-        os.sleep(1)
-    end
-end
-
-function StorageService:moveItemToStorage(slot, item)
-    self.logger:warn("StorageService", string.format(
-        "[MOVE] Starting move to storage: slot=%d, item=%s, count=%d",
+        "[INPUT→STORAGE] Starting transfer: slot=%d, item=%s x%d",
         slot, item.name, item.count
     ))
 
-    -- Find best storage location
-    local targetStorage = self:findBestStorage(item)
+    local moved = 0
+    local triedStorages = {}
 
-    if targetStorage then
-        local moved = 0
+    -- Keep trying different storage locations until we succeed or run out of options
+    while moved == 0 do
+        -- Find best storage location (excluding ones we've already tried)
+        local targetStorage = self:findBestStorage(item, triedStorages)
 
-        self.logger:warn("StorageService", string.format(
-            "[MOVE] Target storage: %s (isME=%s)",
-            targetStorage.name, tostring(targetStorage.isME or false)
-        ))
+        if not targetStorage then
+            self.logger:warn("StorageService", string.format(
+                "[INPUT→STORAGE] No storage found for %s (tried %d storages)",
+                item.name, #triedStorages
+            ))
+            return
+        end
+
+        -- Mark this storage as tried
+        triedStorages[targetStorage.name] = true
 
         -- Handle ME interfaces with importItem
         if targetStorage.isME then
@@ -501,59 +432,285 @@ function StorageService:moveItemToStorage(slot, item)
                 }
 
                 local ok, result = pcall(function()
-                    return meInterface.importItem(importFilter, self.bufferInventory.side or "up")
+                    return meInterface.importItem(importFilter, self.inputConfig.side)
                 end)
 
                 if ok and result and result > 0 then
                     moved = result
                     self.logger:warn("StorageService", string.format(
-                        "[MOVE] Imported %d x %s to ME system",
+                        "[INPUT→STORAGE] Imported %d x %s to ME system",
                         moved, item.name
                     ))
                 end
             end
         else
             -- Regular inventory - use pushItems
-            moved = self.buffer.pushItems(targetStorage.name, slot)
-            self.logger:warn("StorageService", string.format(
-                "[MOVE] Pushed %d x %s to regular storage",
-                moved or 0, item.name
-            ))
+            moved = self.inputChest.pushItems(targetStorage.name, slot) or 0
+            if moved > 0 then
+                self.logger:warn("StorageService", string.format(
+                    "[INPUT→STORAGE] Pushed %d x %s to %s",
+                    moved, item.name, targetStorage.name
+                ))
+            else
+                self.logger:warn("StorageService", string.format(
+                    "[INPUT→STORAGE] Failed to push to %s (full?), trying next storage...",
+                    targetStorage.name
+                ))
+            end
         end
 
-        -- Only update index AFTER successful move
-        if moved and moved > 0 then
-            self.logger:warn("StorageService", string.format(
-                "[MOVE] Submitting index update task for %s (count=%d)",
-                item.name, moved
-            ))
-
-            -- Submit individual task for index update
-            self.scheduler:submit("index", function()
-                self:updateIndex(item.name, moved, "add")
-            end, "index_update")
-
-            self.eventBus:publish("storage.movedToStorage", {
-                item = item.name,
-                count = moved,
-                storage = targetStorage.name,
-                isME = targetStorage.isME or false
-            })
-        else
-            self.logger:warn("StorageService", string.format(
-                "[MOVE] Failed to move %s to storage",
-                item.name
-            ))
+        -- Break if we've tried too many (safety limit)
+        if #triedStorages >= 20 then
+            self.logger:error("StorageService", "[INPUT→STORAGE] Tried 20 storages, giving up")
+            break
         end
+    end
+
+    -- Publish event (NO index update - storage monitor will handle that)
+    if moved and moved > 0 then
+        self.eventBus:publish("storage.inputReceived", {
+            item = item.name,
+            count = moved,
+            from = "input",
+            to = triedStorages, -- This will be a table, but we don't really need it
+            isME = false
+        })
+
+        self.logger:warn("StorageService", string.format(
+            "[INPUT→STORAGE] SUCCESS - moved %d x %s (storage monitor will update index)",
+            moved, item.name
+        ))
     else
         self.logger:warn("StorageService", string.format(
-            "[MOVE] No storage found for %s",
+            "[INPUT→STORAGE] Failed to move %s from input",
             item.name
         ))
     end
 end
 
 function StorageService:withdraw(itemName, requestedCount)
+    -- If in discovery mode, trigger withdrawal-based discovery
+    if self.discoveryMode then
+        self.logger:info("StorageService", "========================================")
+        self.logger:info("StorageService", "WITHDRAWAL-TRIGGERED DISCOVERY")
+        self.logger:info("StorageService", "========================================")
+        self.logger:info("StorageService", "Step 1: Find OUTPUT (left side)")
+        self.logger:info("StorageService", "Step 2: Find INPUT (right side)")
+
+        -- Find item in storage
+        local itemData = self.itemIndex:get(itemName)
+        if not itemData or itemData.count == 0 then
+            self.eventBus:publish("storage.withdrawFailed", {
+                item = itemName,
+                reason = "Item not found"
+            })
+            return 0
+        end
+
+        -- Get list of test inventories
+        local testInventories = {}
+        for _, name in ipairs(self.modem.getNamesRemote()) do
+            local pType = peripheral.getType(name)
+            if pType and (pType:find("chest") or pType:find("barrel") or pType:find("shulker")) then
+                table.insert(testInventories, name)
+            end
+        end
+
+        self.logger:info("StorageService", "Testing " .. #testInventories .. " inventories")
+
+        -- STEP 1: Find OUTPUT (must appear on LEFT side)
+        local outputNetworkId = nil
+
+        for _, targetName in ipairs(testInventories) do
+            -- Try to move item from storage to this inventory
+            local moved = false
+            for _, storage in ipairs(self.storageMap) do
+                local inv = peripheral.wrap(storage.name)
+                if inv and inv.list then
+                    local slots = inv.list()
+                    for slot, item in pairs(slots) do
+                        if item.name == itemName then
+                            local result = inv.pushItems(targetName, slot, 1)
+                            if result and result > 0 then
+                                moved = true
+                                self.logger:info("StorageService", "Moved item to: " .. targetName)
+                                os.sleep(0.3)
+                                break
+                            end
+                        end
+                    end
+                    if moved then break end
+                end
+            end
+
+            if moved then
+                -- Check if item appeared on LEFT side
+                if peripheral.isPresent("left") then
+                    local leftInv = peripheral.wrap("left")
+                    if leftInv and leftInv.list then
+                        local leftItems = leftInv.list()
+                        for _, item in pairs(leftItems) do
+                            if item.name == itemName then
+                                outputNetworkId = targetName
+                                self.logger:info("StorageService", "OUTPUT FOUND: " .. targetName .. " (left side)")
+                                break
+                            end
+                        end
+                    end
+                end
+
+                if outputNetworkId then
+                    break
+                else
+                    -- Not output, move item back to storage
+                    local targetInv = peripheral.wrap(targetName)
+                    if targetInv and targetInv.list then
+                        local targetSlots = targetInv.list()
+                        for slot, item in pairs(targetSlots) do
+                            if item.name == itemName then
+                                -- Move back to first available storage
+                                for _, storage in ipairs(self.storageMap) do
+                                    local moved = targetInv.pushItems(storage.name, slot, 1)
+                                    if moved and moved > 0 then
+                                        break
+                                    end
+                                end
+                                break
+                            end
+                        end
+                    end
+                    os.sleep(0.2)
+                end
+            end
+        end
+
+        if not outputNetworkId then
+            self.logger:error("StorageService", "Failed to find OUTPUT on left side!")
+            return 0
+        end
+
+        -- STEP 2: Find INPUT (must appear on RIGHT side)
+        local inputNetworkId = nil
+
+        for _, targetName in ipairs(testInventories) do
+            if targetName == outputNetworkId then
+                -- Skip output
+                goto continue
+            end
+
+            -- Try to move item from storage to this inventory
+            local moved = false
+            for _, storage in ipairs(self.storageMap) do
+                local inv = peripheral.wrap(storage.name)
+                if inv and inv.list then
+                    local slots = inv.list()
+                    for slot, item in pairs(slots) do
+                        if item.name == itemName then
+                            local result = inv.pushItems(targetName, slot, 1)
+                            if result and result > 0 then
+                                moved = true
+                                self.logger:info("StorageService", "Moved item to: " .. targetName)
+                                os.sleep(0.3)
+                                break
+                            end
+                        end
+                    end
+                    if moved then break end
+                end
+            end
+
+            if moved then
+                -- Check if item appeared on RIGHT side
+                if peripheral.isPresent("right") then
+                    local rightInv = peripheral.wrap("right")
+                    if rightInv and rightInv.list then
+                        local rightItems = rightInv.list()
+                        for _, item in pairs(rightItems) do
+                            if item.name == itemName then
+                                inputNetworkId = targetName
+                                self.logger:info("StorageService", "INPUT FOUND: " .. targetName .. " (right side)")
+                                break
+                            end
+                        end
+                    end
+                end
+
+                if inputNetworkId then
+                    break
+                else
+                    -- Not input, move item back to storage
+                    local targetInv = peripheral.wrap(targetName)
+                    if targetInv and targetInv.list then
+                        local targetSlots = targetInv.list()
+                        for slot, item in pairs(targetSlots) do
+                            if item.name == itemName then
+                                -- Move back to first available storage
+                                for _, storage in ipairs(self.storageMap) do
+                                    local moved = targetInv.pushItems(storage.name, slot, 1)
+                                    if moved and moved > 0 then
+                                        break
+                                    end
+                                end
+                                break
+                            end
+                        end
+                    end
+                    os.sleep(0.2)
+                end
+            end
+
+            ::continue::
+        end
+
+        if not inputNetworkId then
+            self.logger:error("StorageService", "Failed to find INPUT on right side!")
+            return 0
+        end
+
+        -- Move item from INPUT to OUTPUT
+        self.logger:info("StorageService", "Moving item from INPUT to OUTPUT...")
+        local inputInv = peripheral.wrap(inputNetworkId)
+        if inputInv and inputInv.list then
+            local inputSlots = inputInv.list()
+            for slot, item in pairs(inputSlots) do
+                if item.name == itemName then
+                    inputInv.pushItems(outputNetworkId, slot, 1)
+                    os.sleep(0.2)
+                    break
+                end
+            end
+        end
+
+        -- Save configuration
+        self.inputConfig = {
+            side = "right",
+            networkId = inputNetworkId
+        }
+
+        self.outputConfig = {
+            side = "left",
+            networkId = outputNetworkId
+        }
+
+        self.logger:info("StorageService", "========================================")
+        self.logger:info("StorageService", "DISCOVERY COMPLETE")
+        self.logger:info("StorageService", "Input (right): " .. inputNetworkId)
+        self.logger:info("StorageService", "Output (left): " .. outputNetworkId)
+        self.logger:info("StorageService", "========================================")
+
+        self:saveConfigAndStart()
+
+        -- Item is now in output, count as 1 withdrawn
+        if requestedCount <= 1 then
+            return 1
+        else
+            -- Withdraw remaining items
+            os.sleep(0.5)
+            local additional = self:withdraw(itemName, requestedCount - 1)
+            return 1 + additional
+        end
+    end
+
     local itemData = self.itemIndex:get(itemName)
 
     if not itemData or itemData.count == 0 then
@@ -639,9 +796,8 @@ function StorageService:withdraw(itemName, requestedCount)
         end
     end
 
-    if withdrawn > 0 then
-        self:updateIndex(itemName, withdrawn, "remove")
-    end
+    -- Don't update index here - storage monitor will detect the removal and update it
+    -- This prevents double-counting (withdraw + monitor both updating)
 
     self.eventBus:publish("storage.withdrawComplete", {
         item = itemName,
@@ -653,13 +809,15 @@ function StorageService:withdraw(itemName, requestedCount)
 end
 
 -- Standard methods
-function StorageService:findBestStorage(item)
+function StorageService:findBestStorage(item, triedStorages)
+    triedStorages = triedStorages or {}
+
     -- First pass: prefer ME interfaces (unlimited storage)
     for _, storage in ipairs(self.storageMap) do
-        -- Skip input, output, and buffer
+        -- Skip input, output, and already-tried storages
         if storage.name ~= self.inputConfig.networkId and
                 storage.name ~= self.outputConfig.networkId and
-                storage.name ~= self.bufferInventory.name then
+                not triedStorages[storage.name] then
 
             if storage.isME then
                 -- ME interfaces always have space
@@ -670,10 +828,10 @@ function StorageService:findBestStorage(item)
 
     -- Second pass: check regular inventories
     for _, storage in ipairs(self.storageMap) do
-        -- Skip input, output, and buffer
+        -- Skip input, output, and already-tried storages
         if storage.name ~= self.inputConfig.networkId and
                 storage.name ~= self.outputConfig.networkId and
-                storage.name ~= self.bufferInventory.name then
+                not triedStorages[storage.name] then
 
             if not storage.isME then
                 local inv = peripheral.wrap(storage.name)
@@ -822,7 +980,7 @@ function StorageService:rebuildIndexAllInventories()
         end
     end
 
-    self.itemIndex:save("/storage/data/item_index.dat")
+    self.itemIndex:save("/data/item_index.dat")
 
     local uniqueCount = self.itemIndex:getSize()
 
@@ -849,7 +1007,7 @@ function StorageService:rebuildIndex()
     local totalItems = 0
     local totalSlots = 0
 
-    -- Build skip list for special inventories
+    -- Build skip list for special inventories (input and output only, no buffer)
     local skipList = {}
     if self.inputConfig and self.inputConfig.networkId then
         skipList[self.inputConfig.networkId] = true
@@ -858,13 +1016,6 @@ function StorageService:rebuildIndex()
     if self.outputConfig and self.outputConfig.networkId then
         skipList[self.outputConfig.networkId] = true
         self.logger:info("StorageService", "Skip output: " .. self.outputConfig.networkId)
-    end
-    if self.bufferInventory then
-        local bufferName = self.bufferInventory.name or self.bufferInventory.networkId
-        if bufferName then
-            skipList[bufferName] = true
-            self.logger:info("StorageService", "Skip buffer: " .. bufferName)
-        end
     end
 
     self.logger:info("StorageService", string.format("StorageMap contains %d entries:", #self.storageMap))
@@ -979,7 +1130,7 @@ function StorageService:rebuildIndex()
         end
     end
 
-    self.itemIndex:save("/storage/data/item_index.dat")
+    self.itemIndex:save("/data/item_index.dat")
 
     local uniqueCount = self.itemIndex:getSize()
 
@@ -1006,6 +1157,208 @@ function StorageService:getItems()
     ))
 
     return items
+end
+
+function StorageService:monitorStorageChanges()
+    self.logger:info("StorageService", "Starting active storage monitoring...")
+
+    -- Build skip list for special inventories (input and output only, no buffer)
+    local skipList = {}
+    if self.inputConfig and self.inputConfig.networkId then
+        skipList[self.inputConfig.networkId] = true
+        self.logger:info("StorageService", "Monitoring: Skipping input chest: " .. self.inputConfig.networkId)
+    end
+    if self.outputConfig and self.outputConfig.networkId then
+        skipList[self.outputConfig.networkId] = true
+        self.logger:info("StorageService", "Monitoring: Skipping output chest: " .. self.outputConfig.networkId)
+    end
+
+    self.logger:info("StorageService", string.format("Monitoring %d storage inventories", #self.storageMap))
+
+    -- Capture initial state
+    local previousState = self:captureStorageState(skipList)
+    local monitorCount = 0
+
+    while self.running do
+        -- Wait 1 second between checks
+        os.sleep(1)
+        monitorCount = monitorCount + 1
+
+        -- Capture current state
+        local currentState = self:captureStorageState(skipList)
+
+        self.logger:info("StorageService", string.format(
+            "Storage monitor check #%d: %d inventories scanned",
+            monitorCount, self:countInventories(currentState)
+        ))
+
+        -- Compare states and emit events for changes
+        self:detectAndEmitChanges(previousState, currentState)
+
+        previousState = currentState
+    end
+
+    self.logger:info("StorageService", "Stopped active storage monitoring")
+end
+
+function StorageService:countInventories(state)
+    local count = 0
+    for _ in pairs(state) do
+        count = count + 1
+    end
+    return count
+end
+
+function StorageService:countItems(items)
+    local count = 0
+    for _ in pairs(items) do
+        count = count + 1
+    end
+    return count
+end
+
+function StorageService:captureStorageState(skipList)
+    -- Capture detailed state of all storage inventories
+    local state = {}
+    local totalItems = 0
+
+    for _, storage in ipairs(self.storageMap) do
+        if not skipList[storage.name] then
+            local items = {}
+
+            if storage.isME then
+                -- Capture ME system state
+                local meInterface = peripheral.wrap(storage.name)
+                if meInterface and meInterface.listItems then
+                    local ok, meItems = pcall(function() return meInterface.listItems() end)
+                    if ok and meItems then
+                        for _, item in ipairs(meItems) do
+                            local amount = item.amount or item.count or 0
+                            items[item.name] = (items[item.name] or 0) + amount
+                            totalItems = totalItems + 1
+                        end
+                    end
+                end
+            else
+                -- Capture regular inventory state
+                local inv = peripheral.wrap(storage.name)
+                if inv and inv.list then
+                    local ok, slots = pcall(function() return inv.list() end)
+                    if ok and slots then
+                        for slot, item in pairs(slots) do
+                            items[item.name] = (items[item.name] or 0) + item.count
+                            totalItems = totalItems + 1
+                        end
+                    else
+                        self.logger:warn("StorageService", string.format(
+                            "Failed to list inventory: %s",
+                            storage.name
+                        ))
+                    end
+                end
+            end
+
+            state[storage.name] = items
+        end
+    end
+
+    self.logger:info("StorageService", string.format(
+        "Captured state: %d storages, %d total item stacks",
+        self:countInventories(state), totalItems
+    ))
+
+    return state
+end
+
+function StorageService:detectAndEmitChanges(previousState, currentState)
+    -- Track all item names across both states
+    local allItems = {}
+
+    -- Collect all item names from previous state
+    for storageName, items in pairs(previousState) do
+        for itemName, _ in pairs(items) do
+            allItems[itemName] = true
+        end
+    end
+
+    -- Collect all item names from current state
+    for storageName, items in pairs(currentState) do
+        for itemName, _ in pairs(items) do
+            allItems[itemName] = true
+        end
+    end
+
+    local itemCount = 0
+    for _ in pairs(allItems) do itemCount = itemCount + 1 end
+
+    self.logger:info("StorageService", string.format(
+        "Checking %d unique items for changes...",
+        itemCount
+    ))
+
+    local changesDetected = 0
+
+    -- Check each item for changes
+    for itemName, _ in pairs(allItems) do
+        local previousCount = 0
+        local currentCount = 0
+
+        -- Sum previous count across all storages
+        for storageName, items in pairs(previousState) do
+            previousCount = previousCount + (items[itemName] or 0)
+        end
+
+        -- Sum current count across all storages
+        for storageName, items in pairs(currentState) do
+            currentCount = currentCount + (items[itemName] or 0)
+        end
+
+        -- Detect changes
+        if currentCount ~= previousCount then
+            changesDetected = changesDetected + 1
+            local difference = currentCount - previousCount
+
+            if difference > 0 then
+                -- Items added
+                self.logger:info("StorageService", string.format(
+                    ">>> DETECTED ADDITION: %s x%d (was %d, now %d)",
+                    itemName, difference, previousCount, currentCount
+                ))
+
+                self:updateIndex(itemName, difference, "add")
+
+                self.eventBus:publish("storage.itemAdded", {
+                    key = itemName,
+                    item = itemName,
+                    count = difference,
+                    totalCount = currentCount
+                })
+            else
+                -- Items removed
+                local removed = math.abs(difference)
+                self.logger:info("StorageService", string.format(
+                    ">>> DETECTED REMOVAL: %s x%d (was %d, now %d)",
+                    itemName, removed, previousCount, currentCount
+                ))
+
+                self:updateIndex(itemName, removed, "remove")
+
+                self.eventBus:publish("storage.itemRemoved", {
+                    key = itemName,
+                    item = itemName,
+                    count = removed,
+                    totalCount = currentCount
+                })
+            end
+        end
+    end
+
+    if changesDetected > 0 then
+        self.logger:info("StorageService", string.format(
+            "Total changes detected: %d",
+            changesDetected
+        ))
+    end
 end
 
 function StorageService:syncToMonitor()
@@ -1063,7 +1416,7 @@ end
 
 function StorageService:stop()
     self.running = false
-    self.itemIndex:save("/storage/data/item_index.dat")
+    self.itemIndex:save("/data/item_index.dat")
     self.logger:info("StorageService", "Service stopped")
 end
 

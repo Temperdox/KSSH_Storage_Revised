@@ -77,48 +77,48 @@ function SoundService:initializeSoundMap()
             volume = 0.4
         },
         ["storage.withdrawFailed"] = {
-            sound = "block.note_block.bass",
+            sound = "block.anvil.land",
             pitch = 0.5,
             volume = 0.5
         },
 
         -- Task events
         ["task.start"] = {
-            sound = "block.note_block.harp",
+            sound = "entity.experience_orb.pickup",
             pitch = 1.0,
             volume = 0.1
         },
         ["task.end"] = {
-            sound = "block.note_block.harp",
+            sound = "entity.experience_orb.pickup",
             pitch = 1.5,
             volume = 0.1
         },
         ["task.error"] = {
-            sound = "block.note_block.didgeridoo",
+            sound = "entity.villager.no",
             pitch = 0.5,
             volume = 0.6
         },
 
         -- System events
         ["system.ready"] = {
-            sound = "block.note_block.chime",
+            sound = "block.bell.use",
             pitch = 1.0,
             volume = 0.8
         },
         ["system.serviceStarted"] = {
-            sound = "block.note_block.bell",
+            sound = "block.bell.use",
             pitch = 1.2,
             volume = 0.3
         },
 
         -- Network events
         ["net.rpc.request"] = {
-            sound = "block.note_block.bit",
+            sound = "block.dispenser.dispense",
             pitch = 1.0,
             volume = 0.2
         },
         ["net.rpc.response"] = {
-            sound = "block.note_block.bit",
+            sound = "block.dispenser.dispense",
             pitch = 1.3,
             volume = 0.2
         },
@@ -149,7 +149,7 @@ function SoundService:initializeSoundMap()
 
         -- Stats events
         ["stats.minuteTick"] = {
-            sound = "block.note_block.pling",
+            sound = "entity.experience_orb.pickup",
             pitch = 2.0,
             volume = 0.1
         },

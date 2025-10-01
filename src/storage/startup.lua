@@ -2,7 +2,7 @@
 -- PROPER STARTUP WITH PRINT OVERRIDE AND FULL TERMINAL UI
 -- ============================================================================
 
--- /storage/startup.lua
+-- /startup.lua
 -- Full startup with print redirection to UI console
 
 local function startup()
@@ -34,18 +34,45 @@ local function startup()
         -- DO NOT print to actual console - it will break the UI
     end
 
-    -- System paths
-    local BASE_PATH = "/storage"
-    package.path = package.path .. ";" .. BASE_PATH .. "/?.lua"
-    package.path = package.path .. ";" .. BASE_PATH .. "/?/init.lua"
+    -- System paths (files are in computer root, not /storage subdirectory)
+    local BASE_PATH = ""
 
-    -- Load core modules
+    -- Just ensure we're in the root directory - use Lua's default package.path
+    shell.setDir("/")
+
+    -- ========================================================================
+    -- LOAD ALL MODULES AT THE BEGINNING
+    -- ========================================================================
+
+    -- Core modules
     local fsx = require("core.fsx")
     local EventBus = require("core.event_bus")
     local Scheduler = require("core.scheduler")
     local Logger = require("core.logger")
     local TimeWheel = require("core.timewheel")
     local DiskManager = require("core.disk_manager")
+
+    -- Service modules
+    local Bootstrap = require("services.bootstrap")
+    local StorageService = require("services.storage_service")
+    local MonitorService = require("services.monitor_service")
+    local ApiService = require("services.api_service")
+    local StatsService = require("services.stats_service")
+    local TestsService = require("services.tests_service")
+    local SettingsService = require("services.settings_service")
+    local SoundService = require("services.sound_service")
+    local EventsBridge = require("services.events_bridge")
+
+    -- UI modules
+    local Router = require("ui.router")
+    local ConsolePage = require("ui.pages.console_page")
+    local StatsPage = require("ui.pages.stats_page")
+    local TestsPage = require("ui.pages.tests_page")
+    local SettingsPage = require("ui.pages.settings_page")
+
+    -- Command modules
+    local CommandFactory = require("factories.command_factory")
+    local CommandLoader = require("commands.init")
 
     -- Initialize event bus early for disk manager
     local eventBus = EventBus:new()
@@ -128,7 +155,7 @@ local function startup()
         settings = {
             theme = "dark",
             logLevel = "debug",  -- Console log level
-            fileLogLevel = "warn",  -- File log level
+            fileLogLevel = "trace",  -- File log level - SAVE EVERYTHING TO DISK!
             inputSide = "right",
             outputSide = "left",
             soundEnabled = true,
@@ -159,6 +186,19 @@ local function startup()
     logger.printBuffer = printBuffer  -- Share the print buffer
     logger.diskManager = diskManager  -- Use disk manager for file writes
 
+    -- Verify disk manager is set
+    if logger.diskManager then
+        local status = diskManager:getStatus()
+        logger:warn("Logger", "========================================")
+        logger:warn("Logger", "DISK MANAGER CONNECTED")
+        logger:warn("Logger", string.format("Current disk: %s", status.currentDisk and status.currentDisk.mountPath or "NONE"))
+        logger:warn("Logger", string.format("Available disks: %d", #diskManager.disks))
+        logger:warn("Logger", "ALL LOGS WILL BE SAVED TO DISK!")
+        logger:warn("Logger", "========================================")
+    else
+        logger:error("Logger", "CRITICAL: NO DISK MANAGER - LOGS WILL NOT BE SAVED!")
+    end
+
     -- Initialize scheduler
     local scheduler = Scheduler:new(eventBus)
     scheduler:createPool("io", settings.pools.io)
@@ -170,31 +210,14 @@ local function startup()
     scheduler:createPool("tests", 2)
     scheduler:createPool("sound", 1)
 
-    -- Load services
-    local Bootstrap = require("services.bootstrap")
-    local StorageService = require("services.storage_service")
-    local MonitorService = require("services.monitor_service")
-    local ApiService = require("services.api_service")
-    local StatsService = require("services.stats_service")
-    local TestsService = require("services.tests_service")
-    local SettingsService = require("services.settings_service")
-    local SoundService = require("services.sound_service")
-    local EventsBridge = require("services.events_bridge")
-
     -- Bootstrap storage
     logger:info("Bootstrap", "Discovering storage inventories...")
     local bootstrap = Bootstrap:new(eventBus, logger)
-    local storageMap, bufferInventory = bootstrap:discover()
-
-    if not bufferInventory then
-        -- Use original print for critical errors before UI loads
-        originalPrint("[ERROR] No suitable buffer inventory found!")
-        return
-    end
+    local storageMap = bootstrap:discover()
 
     logger:info("Bootstrap", string.format(
-            "Found %d storage inventories, buffer: %s",
-            #storageMap, bufferInventory.name
+            "Found %d storage inventories",
+            #storageMap
     ))
 
     -- Initialize time wheel
@@ -207,7 +230,6 @@ local function startup()
         logger = logger,
         settings = settings,
         storageMap = storageMap,
-        bufferInventory = bufferInventory,
         timeWheel = timeWheel,
         diskManager = diskManager,  -- Add disk manager to context
         basePath = BASE_PATH,
@@ -239,21 +261,14 @@ local function startup()
     end
 
     -- Initialize Terminal UI Router and Pages
-    local Router = require("ui.router")
     local router = Router:new(context)
     context.router = router
 
     -- Load command factory
-    local CommandFactory = require("factories.command_factory")
     local commandFactory = CommandFactory:new(context)
     context.commandFactory = commandFactory
 
     -- Register pages
-    local ConsolePage = require("ui.pages.console_page")
-    local StatsPage = require("ui.pages.stats_page")
-    local TestsPage = require("ui.pages.tests_page")
-    local SettingsPage = require("ui.pages.settings_page")
-
     router:register("console", ConsolePage:new(context))
     router:register("stats", StatsPage:new(context))
     router:register("tests", TestsPage:new(context))
@@ -263,7 +278,6 @@ local function startup()
     router:navigate("console")
 
     -- Load commands
-    local CommandLoader = require("commands.init")
     CommandLoader.loadAll(commandFactory, context)
 
     logger:info("System", "All services initialized!")
@@ -310,25 +324,11 @@ local function startup()
         end
     end)
 
-    -- Process 3: Storage Input Monitor
-    table.insert(processes, function()
-        while context.running do
-            if context.services.storage and context.services.storage.monitorInput then
-                context.services.storage:monitorInput()
-            end
-            os.sleep(0.5)
-        end
-    end)
+    -- Process 3: Storage Input Monitor (REMOVED - now runs in scheduler)
+    -- Input monitoring is now handled by scheduler thread in storage service
 
-    -- Process 4: Storage Buffer Processor
-    table.insert(processes, function()
-        while context.running do
-            if context.services.storage and context.services.storage.processBuffer then
-                context.services.storage:processBuffer()
-            end
-            os.sleep(1)
-        end
-    end)
+    -- Process 4: Buffer Processor (REMOVED - no longer needed)
+    -- Items now move directly from Input → Storage (no buffer step)
 
     -- Process 5: Monitor Service (if available)
     if context.services.monitor and peripheral.find("monitor") then

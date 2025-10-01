@@ -7,7 +7,7 @@ function Bootstrap:new(eventBus, logger)
     local o = setmetatable({}, self)
     o.eventBus = eventBus
     o.logger = logger
-    o.configPath = "/storage/cfg/storages.json"
+    o.configPath = "/cfg/storages.json"
     return o
 end
 
@@ -21,7 +21,7 @@ function Bootstrap:discover()
 
     -- Find wired modem on back
     local modem = peripheral.find("modem", function(name, p)
-        return name == "back" and p.isWireless and not p.isWireless()
+        return name == "back" and not p.isWireless()
     end)
 
     if not modem then
@@ -96,33 +96,9 @@ function Bootstrap:discover()
         error("[ERROR] No storage inventories found!")
     end
 
-    if not largestStorage then
-        error("[ERROR] Could not determine buffer inventory!")
-    end
-
-    self.logger:info("Bootstrap", string.format(
-        "Selected buffer: %s (%d slots)", largestStorage.name, largestStorage.size
-    ))
-
-    -- Remove buffer from storage list
-    local finalStorages = {}
-    for _, storage in ipairs(storages) do
-        if storage.id ~= largestStorage.id then
-            table.insert(finalStorages, storage)
-            self.logger:info("Bootstrap", string.format(
-                "Adding to storage list: %s", storage.name
-            ))
-        else
-            self.logger:info("Bootstrap", string.format(
-                "Removing buffer from storage list: %s", storage.name
-            ))
-        end
-    end
-
-    -- Save configuration
+    -- Save configuration (NO BUFFER - all inventories are storage)
     local config = {
-        storages = finalStorages,
-        buffer = largestStorage,
+        storages = storages,
         inputSide = "right",
         outputSide = "left"
     }
@@ -130,11 +106,11 @@ function Bootstrap:discover()
     fsx.writeJson(self.configPath, config)
 
     self.logger:info("Bootstrap", string.format(
-            "Configuration saved: %d storages + buffer (%s)",
-            #finalStorages, largestStorage.name
+            "Configuration saved: %d storages (no buffer needed)",
+            #storages
     ))
 
-    return finalStorages, largestStorage
+    return storages
 end
 
 function Bootstrap:isInventory(pType)
@@ -162,11 +138,6 @@ end
 
 function Bootstrap:loadConfig(config)
     local storages = config.storages or {}
-    local buffer = config.buffer
-
-    if not buffer then
-        error("[ERROR] No buffer configuration found!")
-    end
 
     -- Verify peripherals still exist
     for _, storage in ipairs(storages) do
@@ -177,11 +148,7 @@ function Bootstrap:loadConfig(config)
         end
     end
 
-    if not peripheral.isPresent(buffer.name) then
-        error("[ERROR] Buffer inventory no longer present!")
-    end
-
-    return storages, buffer
+    return storages
 end
 
 function Bootstrap:rescan()

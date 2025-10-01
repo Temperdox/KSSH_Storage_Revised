@@ -7,8 +7,8 @@ function StatsService:new(context)
     o.eventBus = context.eventBus
     o.logger = context.logger
 
-    o.uptimeFile = "/storage/cfg/uptime.json"
-    o.statsFile = "/storage/data/stats.json"
+    o.uptimeFile = "/cfg/uptime.json"
+    o.statsFile = "/data/stats.json"
 
     o.stats = {
         startTime = os.epoch("utc"),

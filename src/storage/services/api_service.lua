@@ -15,7 +15,7 @@ function ApiService:new(context)
 
     -- Find wireless modem on bottom
     o.modem = peripheral.find("modem", function(name, p)
-        return name == "bottom" and p.isWireless and p.isWireless()
+        return name == "bottom" and p.isWireless()
     end)
 
     if not o.modem then

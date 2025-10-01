@@ -262,7 +262,7 @@ function Endpoints:registerEndpoints()
             current[keys[#keys]] = params.value
 
             -- Save settings
-            local settingsPath = "/storage/cfg/settings.json"
+            local settingsPath = "/cfg/settings.json"
             local file = fs.open(settingsPath, "w")
             if file then
                 local ok, serialized = pcall(textutils.serialiseJSON, self.context.settings)

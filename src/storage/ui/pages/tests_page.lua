@@ -584,7 +584,7 @@ function TestsPage:getTestById(id)
 end
 
 function TestsPage:saveTestResults()
-    local resultsFile = "/storage/logs/tests-" .. os.date("%Y%m%d") .. ".log"
+    local resultsFile = "/logs/tests-" .. os.date("%Y%m%d") .. ".log"
     local file = fs.open(resultsFile, "a")
 
     if file then

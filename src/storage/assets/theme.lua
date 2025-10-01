@@ -12,7 +12,7 @@ function Theme:new(themeName)
     o.colors = Palette.themes[o.name] or Palette.themes.dark
 
     -- Load custom theme if exists
-    local customPath = "/storage/cfg/themes/" .. o.name .. ".json"
+    local customPath = "/cfg/themes/" .. o.name .. ".json"
     if fs.exists(customPath) then
         local file = fs.open(customPath, "r")
         local content = file.readAll()

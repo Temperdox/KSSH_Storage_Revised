@@ -1,4 +1,4 @@
--- /storage/core/event_bus.lua
+-- /core/event_bus.lua
 -- Optimized event bus that doesn't flood the system with events
 
 local EventBus = {}

@@ -142,10 +142,39 @@ function MonitorService:new(context)
     o.frameBuffer = FrameBuffer:new(o.width, o.height)
 
     -- UI state
-    o.currentLetter = nil
     o.currentPage = 1
     o.sortBy = "name"
     o.showStatsModal = false
+    o.currentView = "storage"  -- "storage" or "network"
+
+    -- Storage page state
+    o.currentLetter = nil
+
+    -- Order modal state
+    o.showOrderModal = false
+    o.selectedItem = nil
+    o.orderAmount = 1
+    o.selectedLocation = "local"  -- Default to local
+
+    -- Locations modal state
+    o.showLocationsModal = false
+    o.locationsPage = 1
+
+    -- Network page state
+    o.connectionName = ""
+    o.showWarningModal = false
+    o.warningMessage = ""
+
+    -- Pairing state
+    o.pairingState = "idle"  -- "idle", "generating", "waiting_response"
+    o.currentPairingCode = nil
+    o.pairingVerificationCode = nil
+    o.pairingCodeExpiry = 0
+    o.pairingRotationTimer = 0
+    o.incomingPairRequest = nil  -- {computerID, computerName, code}
+
+    -- Paired computers list
+    o.pairedComputers = {}
 
     -- Cached data (updated by background threads)
     o.itemCache = {}
@@ -159,6 +188,11 @@ function MonitorService:new(context)
         inventoryCount = 0,
         bufferChest = "None",
         lastUpdate = 0
+    }
+
+    -- Cached locations (from network service)
+    o.connectedLocations = {
+        {id = "local", name = "Output Chest", available = true}
     }
 
     -- Item display state
@@ -216,11 +250,17 @@ function MonitorService:new(context)
     o.outputSide = "left"
     o:loadIOConfig()
 
+    -- Load paired computers
+    o:loadPairedComputers()
+
+    -- Open rednet for pairing
+    o:openRednet()
+
     return o
 end
 
 function MonitorService:loadIOConfig()
-    local configPath = "/storage/cfg/io_config.json"
+    local configPath = "/cfg/io_config.json"
     if fs.exists(configPath) then
         local file = fs.open(configPath, "r")
         local config = textutils.unserialiseJSON(file.readAll())
@@ -232,6 +272,60 @@ function MonitorService:loadIOConfig()
         if config.output and config.output.side then
             self.outputSide = config.output.side
         end
+    end
+end
+
+function MonitorService:loadPairedComputers()
+    local pairsPath = "/cfg/paired_computers.json"
+    if fs.exists(pairsPath) then
+        local file = fs.open(pairsPath, "r")
+        local data = textutils.unserialiseJSON(file.readAll())
+        file.close()
+
+        if data and type(data) == "table" then
+            self.pairedComputers = data
+            self:updateConnectedLocations()
+        end
+    end
+end
+
+function MonitorService:savePairedComputers()
+    local pairsPath = "/cfg/paired_computers.json"
+    local dir = fs.getDir(pairsPath)
+    if not fs.exists(dir) then
+        fs.makeDir(dir)
+    end
+
+    local file = fs.open(pairsPath, "w")
+    file.write(textutils.serialiseJSON(self.pairedComputers))
+    file.close()
+
+    self:updateConnectedLocations()
+end
+
+function MonitorService:updateConnectedLocations()
+    -- Rebuild locations list
+    self.connectedLocations = {
+        {id = "local", name = "Output Chest", available = true}
+    }
+
+    for _, paired in ipairs(self.pairedComputers) do
+        table.insert(self.connectedLocations, {
+            id = paired.computerID,
+            name = string.format("\"%s\" (%s)", paired.customName, paired.computerName),
+            available = true
+        })
+    end
+end
+
+function MonitorService:openRednet()
+    -- Find and open modem for rednet
+    local modem = peripheral.find("modem")
+    if modem and not rednet.isOpen() then
+        rednet.open(peripheral.getName(modem))
+        self.logger:info("MonitorService", "Rednet opened on " .. peripheral.getName(modem))
+    elseif not modem then
+        self.logger:warn("MonitorService", "No modem found for rednet pairing")
     end
 end
 
@@ -252,14 +346,36 @@ function MonitorService:start()
 
     self.eventBus:subscribe("storage.itemIndexed", function(event, data)
         self:onItemAdded(data)
+        -- Don't refresh here during bulk operations
     end)
 
     self.eventBus:subscribe("index.updated", function(event, data)
         self:onItemUpdated(data)
+        self:refreshCache()  -- Immediate refresh for individual updates
     end)
 
     self.eventBus:subscribe("storage.indexRebuilt", function(event, data)
         self:onIndexRebuilt(data)
+        self:refreshCache()  -- Immediate refresh after full rebuild
+        self.logger:info("MonitorService", "Cache refreshed after index rebuild")
+    end)
+
+    self.eventBus:subscribe("storage.itemAdded", function(event, data)
+        self:onItemAdded(data)
+        self:refreshCache()  -- Immediate refresh
+        self.logger:info("MonitorService", string.format(
+            "Item added: %s x%d - cache refreshed",
+            data.item, data.count
+        ))
+    end)
+
+    self.eventBus:subscribe("storage.itemRemoved", function(event, data)
+        self:onItemUpdated(data)
+        self:refreshCache()  -- Immediate refresh
+        self.logger:info("MonitorService", string.format(
+            "Item removed: %s x%d - cache refreshed",
+            data.item, data.count
+        ))
     end)
 
     -- Start stack decay timer
@@ -334,6 +450,90 @@ function MonitorService:run()
         end
     end)
 
+    -- PAIRING CODE ROTATION THREAD - Rotates pairing code every 30 seconds
+    table.insert(processes, function()
+        while self.running do
+            if self.pairingState == "waiting_response" then
+                local now = os.epoch("utc") / 1000
+                if now >= self.pairingCodeExpiry then
+                    self:rotatePairingCode()
+                end
+            end
+            os.sleep(1)
+        end
+    end)
+
+    -- REDNET MESSAGE HANDLER - Listens for pairing messages
+    table.insert(processes, function()
+        while self.running do
+            if rednet.isOpen() then
+                local senderID, message, protocol = rednet.receive("storage_pairing", 1)
+
+                if senderID and message and type(message) == "table" then
+                    if message.type == "pair_request" then
+                        -- Verify the verification code matches
+                        if message.verificationCode == self.pairingVerificationCode then
+                            self.incomingPairRequest = {
+                                computerID = message.senderID,
+                                computerName = message.senderName,
+                                code = message.verificationCode
+                            }
+                            self.logger:info("MonitorService", string.format(
+                                "Received valid pair request from computer %d",
+                                message.senderID
+                            ))
+                        else
+                            self.logger:warn("MonitorService", string.format(
+                                "Received pair request with invalid code from computer %d",
+                                message.senderID
+                            ))
+                        end
+                    elseif message.type == "pair_accept" then
+                        -- Other computer accepted our pairing request
+                        if self.pairingState == "waiting_response" then
+                            table.insert(self.pairedComputers, {
+                                computerID = message.senderID,
+                                computerName = message.senderName,
+                                customName = self.connectionName
+                            })
+                            self:savePairedComputers()
+
+                            self.logger:info("MonitorService", string.format(
+                                "Pairing accepted by computer %d",
+                                message.senderID
+                            ))
+
+                            -- Clear pairing state
+                            self.pairingState = "idle"
+                            self.currentPairingCode = nil
+                            self.pairingVerificationCode = nil
+                            self.connectionName = ""
+                        end
+                    elseif message.type == "pair_deny" then
+                        -- Other computer denied our pairing request
+                        if self.pairingState == "waiting_response" then
+                            self.logger:info("MonitorService", string.format(
+                                "Pairing denied by computer %d",
+                                message.senderID
+                            ))
+
+                            -- Show warning
+                            self.showWarningModal = true
+                            self.warningMessage = "Pairing request was denied by the other computer."
+
+                            -- Clear pairing state
+                            self.pairingState = "idle"
+                            self.currentPairingCode = nil
+                            self.pairingVerificationCode = nil
+                        end
+                    end
+                end
+            else
+                os.sleep(1)
+            end
+        end
+    end)
+
     -- Input handler
     table.insert(processes, function()
         while self.running do
@@ -355,13 +555,34 @@ function MonitorService:render()
     -- Clear frame buffer
     self.frameBuffer:clear(colors.black)
 
+    -- Draw base UI
+    self:drawBaseUI()
+
+    -- Draw modals in order (bottom to top)
     if self.showStatsModal then
-        -- When modal is open, draw everything then overlay modal
-        self:drawBaseUI()
         self:drawStatsModal()
-    else
-        -- Normal rendering
-        self:drawBaseUI()
+    end
+
+    if self.showOrderModal then
+        self:drawOrderModal()
+
+        -- Locations modal overlays on top of order modal
+        if self.showLocationsModal then
+            self:drawLocationsModal()
+        end
+    end
+
+    -- Pairing modals
+    if self.pairingState == "waiting_response" and not self.incomingPairRequest then
+        self:drawPairingModal()
+    end
+
+    if self.incomingPairRequest then
+        self:drawAcceptDenyModal()
+    end
+
+    if self.showWarningModal then
+        self:drawWarningModal()
     end
 
     -- Flush complete frame to screen (single operation, no flicker)
@@ -371,11 +592,17 @@ end
 function MonitorService:drawBaseUI()
     -- Draw all base UI elements to frame buffer
     self:drawHeader()
-    self:drawTableHeaders()
-    self:drawItemsTable()
-    self:drawProgressBar()
-    self:drawLetterFilter()
-    self:drawPagination()
+
+    if self.currentView == "storage" then
+        self:drawTableHeaders()
+        self:drawItemsTable()
+        self:drawProgressBar()
+        self:drawLetterFilter()
+        self:drawPagination()
+    elseif self.currentView == "network" then
+        self:drawNetworkPage()
+    end
+
     self:drawSeparator()
     self:drawVisualizer()
     self:drawIOIndicators()
@@ -386,16 +613,24 @@ end
 -- ============================================================================
 
 function MonitorService:drawHeader()
-    -- Build header line
-    local title = " STORAGE | [Stats]"
-
-    -- Sort buttons
-    local sortX = self.width - 19
-    local sortText = "Sort: "
-    if self.sortBy == "name" then
-        sortText = sortText .. "[Name]  Count "
+    -- Build header line with page navigation
+    local title
+    if self.currentView == "storage" then
+        title = " STORAGE | [Stats] | Net"
     else
-        sortText = sortText .. " Name  [Count]"
+        title = " Storage | NET"
+    end
+
+    -- Sort buttons (only show on storage page)
+    local sortX = self.width - 19
+    local sortText = ""
+    if self.currentView == "storage" then
+        sortText = "Sort: "
+        if self.sortBy == "name" then
+            sortText = sortText .. "[Name]  Count "
+        else
+            sortText = sortText .. " Name  [Count]"
+        end
     end
 
     local line = title .. string.rep(" ", sortX - #title - 1) .. sortText
@@ -511,7 +746,8 @@ function MonitorService:drawItemsTable()
             if #countStr > countWidth then
                 countStr = countStr:sub(1, countWidth)
             end
-            self.frameBuffer:writeText(xOffset + nameWidth + 3, y, countStr, colors.lime, bgColor)
+            local countColor = (count == 0) and colors.red or colors.lime
+            self.frameBuffer:writeText(xOffset + nameWidth + 3, y, countStr, countColor, bgColor)
 
             -- Stacks
             local stackSize = item.value and item.value.stackSize or 64
@@ -544,7 +780,8 @@ function MonitorService:drawItemsTable()
             if #countStr > countWidth then
                 countStr = countStr:sub(1, countWidth)
             end
-            self.frameBuffer:writeText(xOffset + nameWidth + 3, y, countStr, colors.lime, bgColor)
+            local countColor = (count == 0) and colors.red or colors.lime
+            self.frameBuffer:writeText(xOffset + nameWidth + 3, y, countStr, countColor, bgColor)
 
             -- Stacks
             local stackSize = item.value and item.value.stackSize or 64
@@ -773,6 +1010,391 @@ function MonitorService:drawStatsModal()
     self.frameBuffer:writeText(contentX, contentY, "Click [X] to close", colors.lightGray, colors.gray)
 end
 
+function MonitorService:drawOrderModal()
+    if not self.selectedItem then return end
+
+    -- Modal dimensions (centered, 50% width + 3, auto height)
+    local modalWidth = math.floor(self.width * 0.5) + 3
+    local modalHeight = 15
+    local startX = math.floor((self.width - modalWidth) / 2)
+    local startY = math.floor((self.height - modalHeight) / 2)
+
+    -- Get item info
+    local itemName = self.selectedItem.key:match("([^:]+)$") or self.selectedItem.key
+    local maxAmount = self.selectedItem.value.count or 0
+    local stackSize = self.selectedItem.value.stackSize or 64
+
+    -- Draw modal background
+    self.frameBuffer:fillRect(startX, startY, modalWidth, modalHeight, " ", colors.white, colors.gray)
+
+    -- Draw modal header
+    self.frameBuffer:fillRect(startX, startY, modalWidth, 1, " ", colors.black, colors.lightGray)
+    self.frameBuffer:writeText(startX + 2, startY, "ORDER ITEM", colors.black, colors.lightGray)
+
+    -- Close button
+    self.frameBuffer:writeText(startX + modalWidth - 4, startY, "[X]", colors.red, colors.lightGray)
+
+    -- Draw content
+    local contentY = startY + 2
+    local contentX = startX + 2
+
+    -- Item name (truncate if too long)
+    local displayName = itemName
+    if #displayName > modalWidth - 4 then
+        displayName = displayName:sub(1, modalWidth - 7) .. "..."
+    end
+    self.frameBuffer:writeText(contentX, contentY, displayName, colors.white, colors.gray)
+    contentY = contentY + 1
+
+    self.frameBuffer:writeText(contentX, contentY, string.format("Available: %d", maxAmount), colors.lightGray, colors.gray)
+    contentY = contentY + 2
+
+    -- Amount field
+    self.frameBuffer:writeText(contentX, contentY, "Amount:", colors.white, colors.gray)
+    contentY = contentY + 1
+
+    -- Amount controls line
+    local controlsY = contentY
+    local controlsX = contentX + 2
+
+    -- Triple left button (<<<)
+    self.frameBuffer:writeText(controlsX, controlsY, "<<<", colors.cyan, colors.gray)
+    controlsX = controlsX + 4
+
+    -- Double left button (<<)
+    self.frameBuffer:writeText(controlsX, controlsY, "<<", colors.cyan, colors.gray)
+    controlsX = controlsX + 3
+
+    -- Single left button (<)
+    self.frameBuffer:writeText(controlsX, controlsY, "<", colors.cyan, colors.gray)
+    controlsX = controlsX + 2
+
+    -- Amount display
+    local amountStr = tostring(self.orderAmount)
+    self.frameBuffer:fillRect(controlsX, controlsY, 8, 1, " ", colors.white, colors.black)
+    local amountX = controlsX + math.floor((8 - #amountStr) / 2)
+    self.frameBuffer:writeText(amountX, controlsY, amountStr, colors.white, colors.black)
+    controlsX = controlsX + 9
+
+    -- Single right button (>)
+    self.frameBuffer:writeText(controlsX, controlsY, ">", colors.cyan, colors.gray)
+    controlsX = controlsX + 2
+
+    -- Double right button (>>)
+    self.frameBuffer:writeText(controlsX, controlsY, ">>", colors.cyan, colors.gray)
+    controlsX = controlsX + 3
+
+    -- Triple right button (>>>)
+    self.frameBuffer:writeText(controlsX, controlsY, ">>>", colors.cyan, colors.gray)
+
+    contentY = contentY + 2
+
+    -- Location field
+    self.frameBuffer:writeText(contentX, contentY, "Destination:", colors.white, colors.gray)
+    contentY = contentY + 1
+
+    -- Location selector
+    local locationName = "Output Chest"
+    for _, loc in ipairs(self.connectedLocations) do
+        if loc.id == self.selectedLocation then
+            locationName = loc.name
+            break
+        end
+    end
+
+    local locationBox = "[" .. locationName .. "]"
+    if #locationBox > modalWidth - 4 then
+        locationBox = "[" .. locationName:sub(1, modalWidth - 9) .. "...]"
+    end
+    self.frameBuffer:writeText(contentX + 2, contentY, locationBox, colors.yellow, colors.gray)
+    contentY = contentY + 2
+
+    -- Buttons
+    local buttonY = startY + modalHeight - 2
+    local cancelX = startX + 2
+    local confirmX = startX + modalWidth - 12
+
+    self.frameBuffer:writeText(cancelX, buttonY, "[Cancel]", colors.lightGray, colors.gray)
+    self.frameBuffer:writeText(confirmX, buttonY, "[Confirm]", colors.lime, colors.gray)
+end
+
+function MonitorService:drawLocationsModal()
+    -- Modal dimensions (centered, 40% width, 60% height)
+    local modalWidth = math.floor(self.width * 0.4)
+    local modalHeight = math.floor(self.height * 0.6)
+    local startX = math.floor((self.width - modalWidth) / 2)
+    local startY = math.floor((self.height - modalHeight) / 2)
+
+    -- Draw modal background
+    self.frameBuffer:fillRect(startX, startY, modalWidth, modalHeight, " ", colors.white, colors.gray)
+
+    -- Draw modal header
+    self.frameBuffer:fillRect(startX, startY, modalWidth, 1, " ", colors.black, colors.lightGray)
+    self.frameBuffer:writeText(startX + 2, startY, "SELECT LOCATION", colors.black, colors.lightGray)
+
+    -- Close button
+    self.frameBuffer:writeText(startX + modalWidth - 4, startY, "[X]", colors.red, colors.lightGray)
+
+    -- Draw locations list
+    local contentY = startY + 2
+    local contentX = startX + 2
+
+    local itemsPerPage = modalHeight - 6
+    local totalPages = math.ceil(#self.connectedLocations / itemsPerPage)
+    local startIdx = (self.locationsPage - 1) * itemsPerPage + 1
+    local endIdx = math.min(startIdx + itemsPerPage - 1, #self.connectedLocations)
+
+    if #self.connectedLocations == 0 then
+        self.frameBuffer:writeText(contentX, contentY, "No locations found", colors.lightGray, colors.gray)
+    else
+        for i = startIdx, endIdx do
+            local loc = self.connectedLocations[i]
+            local displayName = loc.name
+            if #displayName > modalWidth - 6 then
+                displayName = displayName:sub(1, modalWidth - 9) .. "..."
+            end
+
+            local textColor = colors.white
+            local prefix = " "
+            if loc.id == self.selectedLocation then
+                prefix = ">"
+                textColor = colors.lime
+            end
+
+            self.frameBuffer:writeText(contentX, contentY, prefix .. " " .. displayName, textColor, colors.gray)
+            contentY = contentY + 1
+        end
+    end
+
+    -- Pagination
+    if totalPages > 1 then
+        local paginationY = startY + modalHeight - 2
+        local paginationStr = string.format("Page %d/%d", self.locationsPage, totalPages)
+
+        if self.locationsPage > 1 and self.locationsPage < totalPages then
+            paginationStr = "< " .. paginationStr .. " >"
+        elseif self.locationsPage > 1 then
+            paginationStr = "< " .. paginationStr
+        elseif self.locationsPage < totalPages then
+            paginationStr = paginationStr .. " >"
+        end
+
+        local paginationX = startX + math.floor((modalWidth - #paginationStr) / 2)
+        self.frameBuffer:writeText(paginationX, paginationY, paginationStr, colors.lightGray, colors.gray)
+    end
+end
+
+function MonitorService:drawNetworkPage()
+    -- Network page layout
+    local contentY = 3
+    local contentX = 2
+
+    -- Title
+    self.frameBuffer:writeText(contentX, contentY, "NETWORK MANAGEMENT", colors.white, colors.black)
+    contentY = contentY + 2
+
+    -- Add Connection section
+    self.frameBuffer:writeText(contentX, contentY, "Add Connection:", colors.lightGray, colors.black)
+    contentY = contentY + 1
+
+    -- Connection name label
+    self.frameBuffer:writeText(contentX + 2, contentY, "Name:", colors.white, colors.black)
+    contentY = contentY + 1
+
+    -- Connection name text box
+    local textBoxWidth = 30
+    self.frameBuffer:fillRect(contentX + 2, contentY, textBoxWidth, 1, " ", colors.white, colors.gray)
+    if #self.connectionName > 0 then
+        local displayName = self.connectionName
+        if #displayName > textBoxWidth - 2 then
+            displayName = displayName:sub(1, textBoxWidth - 2)
+        end
+        self.frameBuffer:writeText(contentX + 3, contentY, displayName, colors.black, colors.gray)
+    else
+        self.frameBuffer:writeText(contentX + 3, contentY, "Enter connection name...", colors.lightGray, colors.gray)
+    end
+    contentY = contentY + 2
+
+    -- Add button
+    self.frameBuffer:writeText(contentX + 2, contentY, "[Add Connection]", colors.lime, colors.black)
+    contentY = contentY + 3
+
+    -- Paired computers section
+    self.frameBuffer:writeText(contentX, contentY, "Paired Computers:", colors.lightGray, colors.black)
+    contentY = contentY + 1
+
+    if #self.pairedComputers == 0 then
+        self.frameBuffer:writeText(contentX + 2, contentY, "No paired computers", colors.gray, colors.black)
+    else
+        -- List paired computers
+        local maxRows = self.height - 25
+        for i = 1, math.min(#self.pairedComputers, maxRows) do
+            local paired = self.pairedComputers[i]
+            local displayText = string.format('"%s" (%s) - ID: %d',
+                paired.customName,
+                paired.computerName,
+                paired.computerID)
+
+            if #displayText > self.width - 6 then
+                displayText = displayText:sub(1, self.width - 9) .. "..."
+            end
+
+            self.frameBuffer:writeText(contentX + 2, contentY, displayText, colors.white, colors.black)
+            contentY = contentY + 1
+        end
+    end
+end
+
+function MonitorService:drawWarningModal()
+    -- Modal dimensions (centered, 50% width, auto height)
+    local modalWidth = math.floor(self.width * 0.5)
+    local modalHeight = 8
+    local startX = math.floor((self.width - modalWidth) / 2)
+    local startY = math.floor((self.height - modalHeight) / 2)
+
+    -- Draw modal background
+    self.frameBuffer:fillRect(startX, startY, modalWidth, modalHeight, " ", colors.white, colors.gray)
+
+    -- Draw modal header
+    self.frameBuffer:fillRect(startX, startY, modalWidth, 1, " ", colors.black, colors.red)
+    self.frameBuffer:writeText(startX + 2, startY, "WARNING", colors.white, colors.red)
+
+    -- Draw warning message
+    local contentY = startY + 2
+    local contentX = startX + 2
+
+    -- Word wrap the message
+    local words = {}
+    for word in self.warningMessage:gmatch("%S+") do
+        table.insert(words, word)
+    end
+
+    local line = ""
+    local maxWidth = modalWidth - 4
+    for _, word in ipairs(words) do
+        if #line + #word + 1 <= maxWidth then
+            line = line == "" and word or line .. " " .. word
+        else
+            self.frameBuffer:writeText(contentX, contentY, line, colors.white, colors.gray)
+            contentY = contentY + 1
+            line = word
+        end
+    end
+    if #line > 0 then
+        self.frameBuffer:writeText(contentX, contentY, line, colors.white, colors.gray)
+    end
+
+    -- OK button
+    local buttonY = startY + modalHeight - 2
+    local buttonX = startX + math.floor((modalWidth - 4) / 2)
+    self.frameBuffer:writeText(buttonX, buttonY, "[OK]", colors.lime, colors.gray)
+end
+
+function MonitorService:drawPairingModal()
+    -- Modal dimensions (centered, 60% width, auto height)
+    local modalWidth = math.floor(self.width * 0.6)
+    local modalHeight = 12
+    local startX = math.floor((self.width - modalWidth) / 2)
+    local startY = math.floor((self.height - modalHeight) / 2)
+
+    -- Draw modal background
+    self.frameBuffer:fillRect(startX, startY, modalWidth, modalHeight, " ", colors.white, colors.gray)
+
+    -- Draw modal header
+    self.frameBuffer:fillRect(startX, startY, modalWidth, 1, " ", colors.black, colors.lightGray)
+    self.frameBuffer:writeText(startX + 2, startY, "PAIRING CODE", colors.black, colors.lightGray)
+
+    -- Draw content
+    local contentY = startY + 2
+    local contentX = startX + 2
+
+    self.frameBuffer:writeText(contentX, contentY, "Enter this code on the other computer:", colors.white, colors.gray)
+    contentY = contentY + 2
+
+    -- Display pairing code (large and centered)
+    local codeDisplay = self.currentPairingCode or "------"
+    local codeX = startX + math.floor((modalWidth - #codeDisplay) / 2)
+    self.frameBuffer:writeText(codeX, contentY, codeDisplay, colors.lime, colors.gray)
+    contentY = contentY + 2
+
+    -- Time remaining
+    local timeRemaining = math.max(0, math.ceil(self.pairingCodeExpiry - (os.epoch("utc") / 1000)))
+    local timerText = string.format("Code expires in %d seconds", timeRemaining)
+    local timerX = startX + math.floor((modalWidth - #timerText) / 2)
+    self.frameBuffer:writeText(timerX, contentY, timerText, colors.lightGray, colors.gray)
+    contentY = contentY + 2
+
+    self.frameBuffer:writeText(contentX, contentY, "Waiting for response...", colors.yellow, colors.gray)
+
+    -- Cancel button
+    local buttonY = startY + modalHeight - 2
+    local buttonX = startX + math.floor((modalWidth - 8) / 2)
+    self.frameBuffer:writeText(buttonX, buttonY, "[Cancel]", colors.red, colors.gray)
+end
+
+function MonitorService:drawAcceptDenyModal()
+    -- Modal dimensions (centered, 60% width, auto height)
+    local modalWidth = math.floor(self.width * 0.6)
+    local modalHeight = 10
+    local startX = math.floor((self.width - modalWidth) / 2)
+    local startY = math.floor((self.height - modalHeight) / 2)
+
+    -- Draw modal background
+    self.frameBuffer:fillRect(startX, startY, modalWidth, modalHeight, " ", colors.white, colors.gray)
+
+    -- Draw modal header
+    self.frameBuffer:fillRect(startX, startY, modalWidth, 1, " ", colors.black, colors.lightGray)
+    self.frameBuffer:writeText(startX + 2, startY, "PAIRING REQUEST", colors.black, colors.lightGray)
+
+    -- Draw content
+    local contentY = startY + 2
+    local contentX = startX + 2
+
+    local requestText = string.format(
+        "Computer %d (%s) requests to pair",
+        self.incomingPairRequest.computerID,
+        self.incomingPairRequest.computerName
+    )
+
+    -- Word wrap if needed
+    if #requestText > modalWidth - 4 then
+        local words = {}
+        for word in requestText:gmatch("%S+") do
+            table.insert(words, word)
+        end
+
+        local line = ""
+        local maxWidth = modalWidth - 4
+        for _, word in ipairs(words) do
+            if #line + #word + 1 <= maxWidth then
+                line = line == "" and word or line .. " " .. word
+            else
+                self.frameBuffer:writeText(contentX, contentY, line, colors.white, colors.gray)
+                contentY = contentY + 1
+                line = word
+            end
+        end
+        if #line > 0 then
+            self.frameBuffer:writeText(contentX, contentY, line, colors.white, colors.gray)
+            contentY = contentY + 1
+        end
+    else
+        self.frameBuffer:writeText(contentX, contentY, requestText, colors.white, colors.gray)
+        contentY = contentY + 1
+    end
+
+    contentY = contentY + 2
+    self.frameBuffer:writeText(contentX, contentY, "Do you want to accept this pairing?", colors.lightGray, colors.gray)
+
+    -- Buttons
+    local buttonY = startY + modalHeight - 2
+    local acceptX = startX + 4
+    local denyX = startX + modalWidth - 10
+
+    self.frameBuffer:writeText(acceptX, buttonY, "[Accept]", colors.lime, colors.gray)
+    self.frameBuffer:writeText(denyX, buttonY, "[Deny]", colors.red, colors.gray)
+end
+
 -- ============================================================================
 -- DATA MANAGEMENT
 -- ============================================================================
@@ -781,9 +1403,26 @@ function MonitorService:refreshCache()
     -- Update item cache from storage service
     if self.context.services and self.context.services.storage then
         local items = self.context.services.storage:getItems()
+        local oldCount = #self.itemCache
         self.itemCache = items
         self.cacheLastUpdate = os.epoch("utc") / 1000
+
+        self.logger:debug("MonitorService", string.format(
+            "Cache refreshed: %d items (was %d)",
+            #items, oldCount
+        ))
     end
+end
+
+function MonitorService:updateCache(items, uniqueCount)
+    -- Direct cache update from storage service (called by syncToMonitor)
+    self.itemCache = items or {}
+    self.cacheLastUpdate = os.epoch("utc") / 1000
+
+    self.logger:debug("MonitorService", string.format(
+        "Cache updated: %d items, %d unique",
+        #items, uniqueCount or 0
+    ))
 end
 
 function MonitorService:updateStats()
@@ -895,6 +1534,175 @@ end
 -- ============================================================================
 
 function MonitorService:handleClick(x, y)
+    -- Handle locations modal clicks (highest priority)
+    if self.showLocationsModal then
+        local modalWidth = math.floor(self.width * 0.4)
+        local modalHeight = math.floor(self.height * 0.6)
+        local startX = math.floor((self.width - modalWidth) / 2)
+        local startY = math.floor((self.height - modalHeight) / 2)
+
+        -- Close button
+        if y == startY and x >= startX + modalWidth - 4 and x <= startX + modalWidth - 1 then
+            self.showLocationsModal = false
+            return
+        end
+
+        -- Pagination
+        local itemsPerPage = modalHeight - 6
+        local totalPages = math.ceil(#self.connectedLocations / itemsPerPage)
+        if totalPages > 1 then
+            local paginationY = startY + modalHeight - 2
+            local paginationStr = string.format("Page %d/%d", self.locationsPage, totalPages)
+            local hasLeft = self.locationsPage > 1
+            local hasRight = self.locationsPage < totalPages
+
+            if hasLeft and hasRight then
+                paginationStr = "< " .. paginationStr .. " >"
+            elseif hasLeft then
+                paginationStr = "< " .. paginationStr
+            elseif hasRight then
+                paginationStr = paginationStr .. " >"
+            end
+
+            local paginationX = startX + math.floor((modalWidth - #paginationStr) / 2)
+
+            if y == paginationY then
+                if hasLeft and x >= paginationX and x <= paginationX + 1 then
+                    self.locationsPage = self.locationsPage - 1
+                    return
+                elseif hasRight and x >= paginationX + #paginationStr - 1 and x <= paginationX + #paginationStr then
+                    self.locationsPage = self.locationsPage + 1
+                    return
+                end
+            end
+        end
+
+        -- Location selection
+        local contentY = startY + 2
+        local contentX = startX + 2
+        local startIdx = (self.locationsPage - 1) * itemsPerPage + 1
+        local endIdx = math.min(startIdx + itemsPerPage - 1, #self.connectedLocations)
+
+        for i = startIdx, endIdx do
+            if y == contentY then
+                local loc = self.connectedLocations[i]
+                self.selectedLocation = loc.id
+                self.showLocationsModal = false
+                return
+            end
+            contentY = contentY + 1
+        end
+
+        -- Click outside closes modal
+        if x < startX or x >= startX + modalWidth or y < startY or y >= startY + modalHeight then
+            self.showLocationsModal = false
+            return
+        end
+
+        return
+    end
+
+    -- Handle order modal clicks
+    if self.showOrderModal then
+        local modalWidth = math.floor(self.width * 0.5) + 3
+        local modalHeight = 15
+        local startX = math.floor((self.width - modalWidth) / 2)
+        local startY = math.floor((self.height - modalHeight) / 2)
+
+        -- Close button
+        if y == startY and x >= startX + modalWidth - 4 and x <= startX + modalWidth - 1 then
+            self.showOrderModal = false
+            self.selectedItem = nil
+            return
+        end
+
+        -- Amount controls
+        local controlsY = startY + 6
+        local controlsX = startX + 4
+
+        local maxAmount = self.selectedItem and (self.selectedItem.value.count or 0) or 0
+        local stackSize = self.selectedItem and (self.selectedItem.value.stackSize or 64) or 64
+
+        if y == controlsY then
+            -- <<< button (decrease by stack size)
+            if x >= controlsX and x <= controlsX + 2 then
+                self.orderAmount = math.max(1, self.orderAmount - stackSize)
+                return
+            end
+            controlsX = controlsX + 4
+
+            -- << button (decrease by 10)
+            if x >= controlsX and x <= controlsX + 1 then
+                self.orderAmount = math.max(1, self.orderAmount - 10)
+                return
+            end
+            controlsX = controlsX + 3
+
+            -- < button (decrease by 1)
+            if x >= controlsX and x <= controlsX then
+                self.orderAmount = math.max(1, self.orderAmount - 1)
+                return
+            end
+            controlsX = controlsX + 11  -- Skip amount display box
+
+            -- > button (increase by 1)
+            if x >= controlsX and x <= controlsX then
+                self.orderAmount = math.min(maxAmount, self.orderAmount + 1)
+                return
+            end
+            controlsX = controlsX + 2
+
+            -- >> button (increase by 10)
+            if x >= controlsX and x <= controlsX + 1 then
+                self.orderAmount = math.min(maxAmount, self.orderAmount + 10)
+                return
+            end
+            controlsX = controlsX + 3
+
+            -- >>> button (increase by stack size)
+            if x >= controlsX and x <= controlsX + 2 then
+                self.orderAmount = math.min(maxAmount, self.orderAmount + stackSize)
+                return
+            end
+        end
+
+        -- Location field click
+        local locationY = startY + 10
+        if y == locationY and x >= startX + 4 and x <= startX + modalWidth - 4 then
+            self.showLocationsModal = true
+            self.locationsPage = 1
+            return
+        end
+
+        -- Cancel button
+        local buttonY = startY + modalHeight - 2
+        local cancelX = startX + 2
+        if y == buttonY and x >= cancelX and x <= cancelX + 7 then
+            self.showOrderModal = false
+            self.selectedItem = nil
+            return
+        end
+
+        -- Confirm button
+        local confirmX = startX + modalWidth - 12
+        if y == buttonY and x >= confirmX and x <= confirmX + 8 then
+            -- Submit order
+            self:submitOrder()
+            self.showOrderModal = false
+            self.selectedItem = nil
+            return
+        end
+
+        -- Click outside closes modal
+        if x < startX or x >= startX + modalWidth or y < startY or y >= startY + modalHeight then
+            self.showOrderModal = false
+            self.selectedItem = nil
+            return
+        end
+
+        return
+    end
+
     -- Handle stats modal clicks
     if self.showStatsModal then
         local modalWidth = math.floor(self.width * 0.6)
@@ -917,20 +1725,102 @@ function MonitorService:handleClick(x, y)
         return
     end
 
-    -- Header clicks
-    if y == 1 then
-        -- Stats link
-        if x >= 12 and x <= 18 then
-            self.showStatsModal = true
+    -- Handle accept/deny modal clicks (highest priority)
+    if self.incomingPairRequest then
+        local modalWidth = math.floor(self.width * 0.6)
+        local modalHeight = 10
+        local startX = math.floor((self.width - modalWidth) / 2)
+        local startY = math.floor((self.height - modalHeight) / 2)
+        local buttonY = startY + modalHeight - 2
+
+        -- Accept button
+        local acceptX = startX + 4
+        if y == buttonY and x >= acceptX and x <= acceptX + 7 then
+            self:acceptPairRequest()
             return
         end
 
-        -- Sort buttons
-        local sortX = self.width - 19
-        if x >= sortX + 6 and x <= sortX + 11 then
-            self.sortBy = "name"
-        elseif x >= sortX + 12 and x <= sortX + 18 then
-            self.sortBy = "count"
+        -- Deny button
+        local denyX = startX + modalWidth - 10
+        if y == buttonY and x >= denyX and x <= denyX + 5 then
+            self:denyPairRequest()
+            return
+        end
+
+        return
+    end
+
+    -- Handle pairing modal clicks
+    if self.pairingState == "waiting_response" and not self.incomingPairRequest then
+        local modalWidth = math.floor(self.width * 0.6)
+        local modalHeight = 12
+        local startX = math.floor((self.width - modalWidth) / 2)
+        local startY = math.floor((self.height - modalHeight) / 2)
+        local buttonY = startY + modalHeight - 2
+        local buttonX = startX + math.floor((modalWidth - 8) / 2)
+
+        -- Cancel button
+        if y == buttonY and x >= buttonX and x <= buttonX + 7 then
+            self:cancelPairing()
+            return
+        end
+
+        return
+    end
+
+    -- Handle warning modal clicks
+    if self.showWarningModal then
+        local modalWidth = math.floor(self.width * 0.5)
+        local modalHeight = 8
+        local startX = math.floor((self.width - modalWidth) / 2)
+        local startY = math.floor((self.height - modalHeight) / 2)
+        local buttonY = startY + modalHeight - 2
+        local buttonX = startX + math.floor((modalWidth - 4) / 2)
+
+        -- OK button
+        if y == buttonY and x >= buttonX and x <= buttonX + 3 then
+            self.showWarningModal = false
+            return
+        end
+
+        -- Click outside closes modal
+        if x < startX or x >= startX + modalWidth or y < startY or y >= startY + modalHeight then
+            self.showWarningModal = false
+            return
+        end
+
+        return
+    end
+
+    -- Header clicks
+    if y == 1 then
+        -- View switching
+        if self.currentView == "storage" then
+            -- Stats link
+            if x >= 12 and x <= 18 then
+                self.showStatsModal = true
+                return
+            end
+
+            -- Net link
+            if x >= 22 and x <= 24 then
+                self.currentView = "network"
+                return
+            end
+
+            -- Sort buttons
+            local sortX = self.width - 19
+            if x >= sortX + 6 and x <= sortX + 11 then
+                self.sortBy = "name"
+            elseif x >= sortX + 12 and x <= sortX + 18 then
+                self.sortBy = "count"
+            end
+        elseif self.currentView == "network" then
+            -- Storage link
+            if x >= 2 and x <= 8 then
+                self.currentView = "storage"
+                return
+            end
         end
     end
 
@@ -991,6 +1881,286 @@ function MonitorService:handleClick(x, y)
             end
         end
     end
+
+    -- Network page clicks
+    if self.currentView == "network" then
+        -- Add connection button
+        if y == 9 and x >= 4 and x <= 19 then
+            if #self.connectionName == 0 then
+                self.showWarningModal = true
+                self.warningMessage = "Please enter a connection name before adding."
+            else
+                -- Start pairing process
+                self:startPairingProcess()
+            end
+            return
+        end
+
+        -- Text box click (for keyboard input in real implementation)
+        -- Note: In ComputerCraft, text input would need os.pullEvent("char") handling
+        -- For now, this is a placeholder
+        return
+    end
+
+    -- Item clicks (open order modal)
+    local startY = 3
+    local endY = self.height - 19
+    if y >= startY and y <= endY then
+        local items = self.currentLetter and self:getFilteredItems() or self:getAllItems()
+        local maxRows = endY - startY + 1
+        local itemsPerPage = maxRows * 2
+        local startIdx = (self.currentPage - 1) * itemsPerPage + 1
+        local endIdx = math.min(startIdx + itemsPerPage - 1, #items)
+
+        -- Build row/column mapping
+        local rowItems = {}
+        for i = startIdx, endIdx do
+            local item = items[i]
+            local itemOffset = i - startIdx
+            local leftColumnItems = math.ceil((endIdx - startIdx + 1) / 2)
+
+            local row, column
+            if itemOffset < leftColumnItems then
+                column = "left"
+                row = itemOffset + 1
+            else
+                column = "right"
+                row = itemOffset - leftColumnItems + 1
+            end
+
+            if row >= 1 and row <= maxRows then
+                if not rowItems[row] then
+                    rowItems[row] = {}
+                end
+                rowItems[row][column] = item
+            end
+        end
+
+        -- Check which item was clicked
+        local clickedRow = y - startY + 1
+        local columnWidth = math.floor(self.width / 2)
+
+        if rowItems[clickedRow] then
+            local clickedItem = nil
+
+            if x <= columnWidth and rowItems[clickedRow].left then
+                clickedItem = rowItems[clickedRow].left
+            elseif x > columnWidth and rowItems[clickedRow].right then
+                clickedItem = rowItems[clickedRow].right
+            end
+
+            if clickedItem then
+                self.selectedItem = clickedItem
+                self.orderAmount = 1
+                self.selectedLocation = "local"
+                self.showOrderModal = true
+                return
+            end
+        end
+    end
+end
+
+function MonitorService:submitOrder()
+    if not self.selectedItem then return end
+
+    -- Log the order
+    self.logger:info("MonitorService", string.format(
+        "Order: %s x%d to %s",
+        self.selectedItem.key,
+        self.orderAmount,
+        self.selectedLocation
+    ))
+
+    -- Withdraw to output chest if location is local
+    if self.selectedLocation == "local" then
+        if self.context.services and self.context.services.storage then
+            local withdrawn = self.context.services.storage:withdraw(
+                self.selectedItem.key,
+                self.orderAmount
+            )
+
+            if withdrawn > 0 then
+                self.logger:info("MonitorService", string.format(
+                    "Withdrew %d x %s to output chest",
+                    withdrawn,
+                    self.selectedItem.key
+                ))
+            else
+                self.logger:warn("MonitorService", string.format(
+                    "Failed to withdraw %s",
+                    self.selectedItem.key
+                ))
+            end
+        end
+    else
+        -- TODO: Implement remote withdrawal via rednet
+        self.logger:warn("MonitorService", "Remote withdrawal not yet implemented")
+    end
+end
+
+-- ============================================================================
+-- PAIRING SYSTEM
+-- ============================================================================
+
+function MonitorService:generatePairingCode()
+    -- Get computer ID
+    local computerID = os.getComputerID()
+
+    -- Generate random 4-digit verification code
+    local verificationCode = math.random(1000, 9999)
+
+    -- Combine: computerID + verificationCode
+    local combined = tostring(computerID) .. string.format("%04d", verificationCode)
+
+    -- Simple encryption: XOR each digit with a rotating key based on current time
+    local timeKey = math.floor(os.epoch("utc") / 30000) % 10  -- Changes every 30 seconds
+    local encrypted = ""
+
+    for i = 1, #combined do
+        local digit = tonumber(combined:sub(i, i))
+        local key = (timeKey + i - 1) % 10
+        local encryptedDigit = (digit + key) % 10
+        encrypted = encrypted .. tostring(encryptedDigit)
+    end
+
+    return encrypted, verificationCode
+end
+
+function MonitorService:decryptPairingCode(encryptedCode)
+    -- Get time key (same as encryption)
+    local timeKey = math.floor(os.epoch("utc") / 30000) % 10
+
+    -- Decrypt: reverse XOR operation
+    local decrypted = ""
+
+    for i = 1, #encryptedCode do
+        local encryptedDigit = tonumber(encryptedCode:sub(i, i))
+        local key = (timeKey + i - 1) % 10
+        local digit = (encryptedDigit - key) % 10
+        if digit < 0 then digit = digit + 10 end
+        decrypted = decrypted .. tostring(digit)
+    end
+
+    -- Split: last 4 digits are verification code, rest is computer ID
+    if #decrypted < 5 then return nil, nil end
+
+    local computerID = tonumber(decrypted:sub(1, #decrypted - 4))
+    local verificationCode = tonumber(decrypted:sub(#decrypted - 3))
+
+    return computerID, verificationCode
+end
+
+function MonitorService:startPairingProcess()
+    -- Generate pairing code
+    local code, verificationCode = self:generatePairingCode()
+
+    self.pairingState = "waiting_response"
+    self.currentPairingCode = code
+    self.pairingVerificationCode = verificationCode
+    self.pairingCodeExpiry = os.epoch("utc") / 1000 + 30
+
+    self.logger:info("MonitorService", "Pairing process started with code: " .. code)
+end
+
+function MonitorService:cancelPairing()
+    self.pairingState = "idle"
+    self.currentPairingCode = nil
+    self.pairingVerificationCode = nil
+    self.pairingCodeExpiry = 0
+
+    self.logger:info("MonitorService", "Pairing cancelled")
+end
+
+function MonitorService:rotatePairingCode()
+    if self.pairingState == "waiting_response" then
+        local code, verificationCode = self:generatePairingCode()
+        self.currentPairingCode = code
+        self.pairingVerificationCode = verificationCode
+        self.pairingCodeExpiry = os.epoch("utc") / 1000 + 30
+
+        self.logger:info("MonitorService", "Pairing code rotated: " .. code)
+    end
+end
+
+function MonitorService:sendPairRequest(encryptedCode)
+    -- Decrypt the code
+    local targetComputerID, verificationCode = self:decryptPairingCode(encryptedCode)
+
+    if not targetComputerID or not verificationCode then
+        self.logger:warn("MonitorService", "Invalid pairing code")
+        return false
+    end
+
+    -- Send pair request via rednet
+    local message = {
+        type = "pair_request",
+        senderID = os.getComputerID(),
+        senderName = os.getComputerLabel() or "Computer " .. os.getComputerID(),
+        verificationCode = verificationCode
+    }
+
+    rednet.send(targetComputerID, message, "storage_pairing")
+
+    self.logger:info("MonitorService", string.format(
+        "Pair request sent to computer %d with code %d",
+        targetComputerID, verificationCode
+    ))
+
+    return true
+end
+
+function MonitorService:acceptPairRequest()
+    if not self.incomingPairRequest then return end
+
+    -- Add to paired computers
+    table.insert(self.pairedComputers, {
+        computerID = self.incomingPairRequest.computerID,
+        computerName = self.incomingPairRequest.computerName,
+        customName = self.connectionName or "Unnamed"
+    })
+
+    -- Save to disk
+    self:savePairedComputers()
+
+    -- Send acceptance response
+    local message = {
+        type = "pair_accept",
+        senderID = os.getComputerID(),
+        senderName = os.getComputerLabel() or "Computer " .. os.getComputerID()
+    }
+
+    rednet.send(self.incomingPairRequest.computerID, message, "storage_pairing")
+
+    self.logger:info("MonitorService", string.format(
+        "Pair request accepted from computer %d",
+        self.incomingPairRequest.computerID
+    ))
+
+    -- Clear state
+    self.incomingPairRequest = nil
+    self.pairingState = "idle"
+    self.connectionName = ""
+end
+
+function MonitorService:denyPairRequest()
+    if not self.incomingPairRequest then return end
+
+    -- Send denial response
+    local message = {
+        type = "pair_deny",
+        senderID = os.getComputerID()
+    }
+
+    rednet.send(self.incomingPairRequest.computerID, message, "storage_pairing")
+
+    self.logger:info("MonitorService", string.format(
+        "Pair request denied from computer %d",
+        self.incomingPairRequest.computerID
+    ))
+
+    -- Clear state
+    self.incomingPairRequest = nil
+    self.pairingState = "idle"
 end
 
 -- ============================================================================
