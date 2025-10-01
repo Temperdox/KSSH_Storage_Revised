@@ -73,18 +73,18 @@ function StorageService:start()
 
         self.scheduler:submit("io", function()
             self:monitorInput()
-        end)
+        end, "input_monitor")
 
         self.scheduler:submit("io", function()
             self:processBuffer()
-        end)
+        end, "buffer_process")
 
         -- Start periodic sync to monitor service
         self.logger:info("StorageService", "Submitting syncToMonitor task...")
         self.scheduler:submit("io", function()
             self.logger:info("StorageService", "syncToMonitor task STARTED in scheduler")
             self:syncToMonitor()
-        end)
+        end, "monitor_sync")
 
         self.logger:info("StorageService", "All IO tasks submitted")
     end
@@ -328,16 +328,16 @@ function StorageService:assignBufferAndSave()
     -- Start monitoring
     self.scheduler:submit("io", function()
         self:monitorInput()
-    end)
+    end, "input_monitor")
 
     self.scheduler:submit("io", function()
         self:processBuffer()
-    end)
+    end, "buffer_process")
 
     -- Start periodic sync to monitor service
     self.scheduler:submit("io", function()
         self:syncToMonitor()
-    end)
+    end, "monitor_sync")
 end
 
 function StorageService:captureAllInventoryState()
@@ -415,27 +415,44 @@ function StorageService:monitorInput()
             local ok, items = pcall(function() return self.inputChest.list() end)
             if ok and items and next(items) then
                 for slot, item in pairs(items) do
-                    -- Transfer using network IDs only!
-                    local moved = self.inputChest.pushItems(self.bufferInventory.name, slot)
-
-                    if moved and moved > 0 then
-                        self.eventBus:publish("storage.inputReceived", {
-                            item = item.name,
-                            count = moved,
-                            from = "input",
-                            to = "buffer"
-                        })
-
-                        self.logger:debug("StorageService", string.format(
-                                "Moved %d x %s to buffer",
-                                moved, item.name
-                        ))
-                    end
+                    -- Submit individual task for each item transfer
+                    self.scheduler:submit("io", function()
+                        self:transferInputToBuffer(slot, item)
+                    end, "input_transfer")
                 end
             end
         end
 
         os.sleep(0.5)
+    end
+end
+
+function StorageService:transferInputToBuffer(slot, item)
+    self.logger:warn("StorageService", string.format(
+        "[TRANSFER] Starting input transfer: slot=%d, item=%s",
+        slot, item.name
+    ))
+
+    -- Transfer using network IDs only!
+    local moved = self.inputChest.pushItems(self.bufferInventory.name, slot)
+
+    if moved and moved > 0 then
+        self.eventBus:publish("storage.inputReceived", {
+            item = item.name,
+            count = moved,
+            from = "input",
+            to = "buffer"
+        })
+
+        self.logger:warn("StorageService", string.format(
+            "[TRANSFER] Moved %d x %s to buffer",
+            moved, item.name
+        ))
+    else
+        self.logger:warn("StorageService", string.format(
+            "[TRANSFER] Failed to move %s from slot %d",
+            item.name, slot
+        ))
     end
 end
 
@@ -445,29 +462,94 @@ function StorageService:processBuffer()
             local ok, items = pcall(function() return self.buffer.list() end)
             if ok and items and next(items) then
                 for slot, item in pairs(items) do
-                    -- Update index
-                    self:updateIndex(item.name, item.count, "add")
-
-                    -- Find best storage location
-                    local targetStorage = self:findBestStorage(item)
-
-                    if targetStorage then
-                        -- Use network ID for transfer
-                        local moved = self.buffer.pushItems(targetStorage.name, slot)
-
-                        if moved and moved > 0 then
-                            self.eventBus:publish("storage.movedToStorage", {
-                                item = item.name,
-                                count = moved,
-                                storage = targetStorage.name
-                            })
-                        end
-                    end
+                    -- Submit individual task for each item move
+                    self.scheduler:submit("io", function()
+                        self:moveItemToStorage(slot, item)
+                    end, "item_move")
                 end
             end
         end
 
         os.sleep(1)
+    end
+end
+
+function StorageService:moveItemToStorage(slot, item)
+    self.logger:warn("StorageService", string.format(
+        "[MOVE] Starting move to storage: slot=%d, item=%s, count=%d",
+        slot, item.name, item.count
+    ))
+
+    -- Find best storage location
+    local targetStorage = self:findBestStorage(item)
+
+    if targetStorage then
+        local moved = 0
+
+        self.logger:warn("StorageService", string.format(
+            "[MOVE] Target storage: %s (isME=%s)",
+            targetStorage.name, tostring(targetStorage.isME or false)
+        ))
+
+        -- Handle ME interfaces with importItem
+        if targetStorage.isME then
+            local meInterface = peripheral.wrap(targetStorage.name)
+            if meInterface and meInterface.importItem then
+                local importFilter = {
+                    name = item.name,
+                    count = item.count
+                }
+
+                local ok, result = pcall(function()
+                    return meInterface.importItem(importFilter, self.bufferInventory.side or "up")
+                end)
+
+                if ok and result and result > 0 then
+                    moved = result
+                    self.logger:warn("StorageService", string.format(
+                        "[MOVE] Imported %d x %s to ME system",
+                        moved, item.name
+                    ))
+                end
+            end
+        else
+            -- Regular inventory - use pushItems
+            moved = self.buffer.pushItems(targetStorage.name, slot)
+            self.logger:warn("StorageService", string.format(
+                "[MOVE] Pushed %d x %s to regular storage",
+                moved or 0, item.name
+            ))
+        end
+
+        -- Only update index AFTER successful move
+        if moved and moved > 0 then
+            self.logger:warn("StorageService", string.format(
+                "[MOVE] Submitting index update task for %s (count=%d)",
+                item.name, moved
+            ))
+
+            -- Submit individual task for index update
+            self.scheduler:submit("index", function()
+                self:updateIndex(item.name, moved, "add")
+            end, "index_update")
+
+            self.eventBus:publish("storage.movedToStorage", {
+                item = item.name,
+                count = moved,
+                storage = targetStorage.name,
+                isME = targetStorage.isME or false
+            })
+        else
+            self.logger:warn("StorageService", string.format(
+                "[MOVE] Failed to move %s to storage",
+                item.name
+            ))
+        end
+    else
+        self.logger:warn("StorageService", string.format(
+            "[MOVE] No storage found for %s",
+            item.name
+        ))
     end
 end
 
@@ -496,26 +578,60 @@ function StorageService:withdraw(itemName, requestedCount)
     for _, storage in ipairs(self.storageMap) do
         if remaining <= 0 then break end
 
-        local inv = peripheral.wrap(storage.name)
-        if inv then
-            local ok, slots = pcall(function() return inv.list() end)
-            if ok and slots then
-                for slot, slotItem in pairs(slots) do
-                    if slotItem.name == itemName and remaining > 0 then
-                        local toMove = math.min(remaining, slotItem.count)
+        -- Handle ME interfaces
+        if storage.isME then
+            local meInterface = peripheral.wrap(storage.name)
+            if meInterface and meInterface.exportItem then
+                -- Export from ME to output chest
+                local exportFilter = {
+                    name = itemName,
+                    count = remaining
+                }
 
-                        -- Use network ID for output!
-                        local moved = inv.pushItems(self.outputConfig.networkId, slot, toMove)
+                local ok, moved = pcall(function()
+                    return meInterface.exportItem(exportFilter, self.outputConfig.side or "up")
+                end)
 
-                        if moved and moved > 0 then
-                            withdrawn = withdrawn + moved
-                            remaining = remaining - moved
+                if ok and moved and moved > 0 then
+                    withdrawn = withdrawn + moved
+                    remaining = remaining - moved
 
-                            self.eventBus:publish("storage.itemWithdrawn", {
-                                item = itemName,
-                                count = moved,
-                                from = storage.name
-                            })
+                    self.eventBus:publish("storage.itemWithdrawn", {
+                        item = itemName,
+                        count = moved,
+                        from = storage.name,
+                        isME = true
+                    })
+
+                    self.logger:debug("StorageService", string.format(
+                        "Exported %d x %s from ME system",
+                        moved, itemName
+                    ))
+                end
+            end
+        else
+            -- Regular inventory
+            local inv = peripheral.wrap(storage.name)
+            if inv then
+                local ok, slots = pcall(function() return inv.list() end)
+                if ok and slots then
+                    for slot, slotItem in pairs(slots) do
+                        if slotItem.name == itemName and remaining > 0 then
+                            local toMove = math.min(remaining, slotItem.count)
+
+                            -- Use network ID for output!
+                            local moved = inv.pushItems(self.outputConfig.networkId, slot, toMove)
+
+                            if moved and moved > 0 then
+                                withdrawn = withdrawn + moved
+                                remaining = remaining - moved
+
+                                self.eventBus:publish("storage.itemWithdrawn", {
+                                    item = itemName,
+                                    count = moved,
+                                    from = storage.name
+                                })
+                            end
                         end
                     end
                 end
@@ -538,29 +654,46 @@ end
 
 -- Standard methods
 function StorageService:findBestStorage(item)
+    -- First pass: prefer ME interfaces (unlimited storage)
     for _, storage in ipairs(self.storageMap) do
         -- Skip input, output, and buffer
         if storage.name ~= self.inputConfig.networkId and
                 storage.name ~= self.outputConfig.networkId and
                 storage.name ~= self.bufferInventory.name then
 
-            local inv = peripheral.wrap(storage.name)
-            if inv then
-                local ok, slots = pcall(function() return inv.list() end)
-                if ok and slots then
-                    -- Check for existing stack
-                    for slot, slotItem in pairs(slots) do
-                        if slotItem.name == item.name and slotItem.count < (slotItem.maxCount or 64) then
-                            return storage
-                        end
-                    end
+            if storage.isME then
+                -- ME interfaces always have space
+                return storage
+            end
+        end
+    end
 
-                    -- Check for empty slot
-                    if inv.size then
-                        local invSize = inv.size()
-                        for i = 1, invSize do
-                            if not slots[i] then
+    -- Second pass: check regular inventories
+    for _, storage in ipairs(self.storageMap) do
+        -- Skip input, output, and buffer
+        if storage.name ~= self.inputConfig.networkId and
+                storage.name ~= self.outputConfig.networkId and
+                storage.name ~= self.bufferInventory.name then
+
+            if not storage.isME then
+                local inv = peripheral.wrap(storage.name)
+                if inv then
+                    local ok, slots = pcall(function() return inv.list() end)
+                    if ok and slots then
+                        -- Check for existing stack
+                        for slot, slotItem in pairs(slots) do
+                            if slotItem.name == item.name and slotItem.count < (slotItem.maxCount or 64) then
                                 return storage
+                            end
+                        end
+
+                        -- Check for empty slot
+                        if inv.size then
+                            local invSize = inv.size()
+                            for i = 1, invSize do
+                                if not slots[i] then
+                                    return storage
+                                end
                             end
                         end
                     end
@@ -603,13 +736,51 @@ function StorageService:rebuildIndexAllInventories()
     local totalItems = 0
     local totalSlots = 0
 
-    -- Scan ALL network inventories, no skip list
+    -- Scan ALL network inventories and ME interfaces, no skip list
     local scannedCount = 0
     for _, name in ipairs(self.modem.getNamesRemote()) do
         local pType = peripheral.getType(name)
 
-        -- Check if it's an inventory type
-        if pType and (pType:find("chest") or pType:find("barrel") or pType:find("drawer") or
+        -- Check if it's an ME interface
+        if pType and (pType:lower():find("me_interface") or pType:lower():find("meinterface")) then
+            scannedCount = scannedCount + 1
+            self.logger:info("StorageService", string.format(">>> Scanning ME Interface %s (%s)", name, pType))
+
+            local meInterface = peripheral.wrap(name)
+            if meInterface and meInterface.listItems then
+                local ok, items = pcall(function() return meInterface.listItems() end)
+                if ok and items then
+                    local itemCount = #items
+                    self.logger:info("StorageService", string.format("    Found %d items in ME system %s", itemCount, name))
+
+                    for _, item in ipairs(items) do
+                        local current = self.itemIndex:get(item.name) or {
+                            count = 0,
+                            stackSize = item.maxCount or 64,
+                            nbtHash = item.nbt,
+                            locations = {},
+                            isME = true
+                        }
+
+                        local amount = item.amount or item.count or 0
+                        current.count = current.count + amount
+                        table.insert(current.locations, {
+                            name = name,
+                            isME = true,
+                            count = amount
+                        })
+
+                        self.itemIndex:put(item.name, current)
+                        totalItems = totalItems + 1
+                    end
+                else
+                    self.logger:error("StorageService", "FAILED to list ME items: " .. name)
+                end
+            else
+                self.logger:error("StorageService", "FAILED to wrap ME interface: " .. name)
+            end
+        -- Check if it's a regular inventory type
+        elseif pType and (pType:find("chest") or pType:find("barrel") or pType:find("drawer") or
                       pType:find("storage") or pType:find("shulker")) then
             scannedCount = scannedCount + 1
             self.logger:info("StorageService", string.format(">>> Scanning %s (%s)", name, pType))
@@ -709,50 +880,99 @@ function StorageService:rebuildIndex()
             storage.name, storage.name, tostring(shouldSkip)))
 
         if not shouldSkip then
-            self.logger:info("StorageService", string.format(">>> Scanning storage: %s", storage.name))
+            self.logger:info("StorageService", string.format(">>> Scanning storage: %s (ME=%s)", storage.name, tostring(storage.isME)))
 
-            local inv = peripheral.wrap(storage.name)
-            if inv then
-                local ok, slots = pcall(function() return inv.list() end)
-                if ok and slots then
-                    local slotCount = 0
-                    for _ in pairs(slots) do slotCount = slotCount + 1 end
-                    totalSlots = totalSlots + slotCount
+            -- Handle ME interfaces differently
+            if storage.isME then
+                local meInterface = peripheral.wrap(storage.name)
+                if meInterface and meInterface.listItems then
+                    local ok, items = pcall(function() return meInterface.listItems() end)
+                    if ok and items then
+                        local itemCount = #items
+                        self.logger:info("StorageService", string.format("    Found %d items in ME system %s", itemCount, storage.name))
 
-                    self.logger:info("StorageService", string.format("    Found %d items in %s", slotCount, storage.name))
+                        for _, item in ipairs(items) do
+                            local current = self.itemIndex:get(item.name) or {
+                                count = 0,
+                                stackSize = item.maxCount or 64,
+                                nbtHash = item.nbt,
+                                locations = {},
+                                isME = true
+                            }
 
-                    for slot, item in pairs(slots) do
-                        local current = self.itemIndex:get(item.name) or {
-                            count = 0,
-                            stackSize = item.maxCount or 64,
-                            nbtHash = item.nbt,
-                            locations = {}
-                        }
+                            local amount = item.amount or item.count or 0
+                            current.count = current.count + amount
+                            table.insert(current.locations, {
+                                id = storage.id,
+                                name = storage.name,
+                                isME = true,
+                                count = amount
+                            })
 
-                        current.count = current.count + item.count
-                        table.insert(current.locations, {
-                            id = storage.id,
-                            slot = slot,
-                            count = item.count
-                        })
+                            self.itemIndex:put(item.name, current)
+                            totalItems = totalItems + 1
 
-                        self.itemIndex:put(item.name, current)
-                        totalItems = totalItems + 1
-
-                        -- Publish event for each item indexed
-                        self.logger:debug("StorageService", string.format("    Indexed: %s x%d", item.name, item.count))
-                        self.eventBus:publish("storage.itemIndexed", {
-                            key = item.name,
-                            item = item.name,
-                            count = current.count,
-                            storage = storage.name
-                        })
+                            -- Publish event for each item indexed
+                            self.logger:debug("StorageService", string.format("    Indexed ME: %s x%d", item.name, amount))
+                            self.eventBus:publish("storage.itemIndexed", {
+                                key = item.name,
+                                item = item.name,
+                                count = current.count,
+                                storage = storage.name,
+                                isME = true
+                            })
+                        end
+                    else
+                        self.logger:error("StorageService", "FAILED to list ME items: " .. storage.name)
                     end
                 else
-                    self.logger:error("StorageService", "FAILED to scan: " .. storage.name)
+                    self.logger:error("StorageService", "FAILED to wrap ME interface: " .. storage.name)
                 end
             else
-                self.logger:error("StorageService", "FAILED to wrap: " .. storage.name)
+                -- Regular inventory
+                local inv = peripheral.wrap(storage.name)
+                if inv then
+                    local ok, slots = pcall(function() return inv.list() end)
+                    if ok and slots then
+                        local slotCount = 0
+                        for _ in pairs(slots) do slotCount = slotCount + 1 end
+                        totalSlots = totalSlots + slotCount
+
+                        self.logger:info("StorageService", string.format("    Found %d items in %s", slotCount, storage.name))
+
+                        for slot, item in pairs(slots) do
+                            local current = self.itemIndex:get(item.name) or {
+                                count = 0,
+                                stackSize = item.maxCount or 64,
+                                nbtHash = item.nbt,
+                                locations = {}
+                            }
+
+                            current.count = current.count + item.count
+                            table.insert(current.locations, {
+                                id = storage.id,
+                                slot = slot,
+                                count = item.count
+                            })
+
+                            self.itemIndex:put(item.name, current)
+                            totalItems = totalItems + 1
+
+                            -- Publish event for each item indexed
+                            self.logger:debug("StorageService", string.format("    Indexed: %s x%d", item.name, item.count))
+                            self.eventBus:publish("storage.itemIndexed", {
+                                key = item.name,
+                                item = item.name,
+                                count = current.count,
+                                storage = storage.name
+                            })
+                        end
+                    else
+                        self.logger:error("StorageService", "FAILED to scan: " .. storage.name)
+                    end
+                else
+                    self.logger:error("StorageService", "FAILED to wrap: " .. storage.name)
+                end
             end
         else
             self.logger:info("StorageService", "Skipping special inventory: " .. storage.name)

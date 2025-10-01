@@ -21,7 +21,8 @@ function MonitorService:new(context)
     -- UI state
     o.currentLetter = nil  -- nil means show all, "#" for special chars, "a"-"z" for letters
     o.currentPage = 1
-    o.itemsPerPage = o.height - 17  -- Header (1) + Letter filter (1) + Column header (1) + Visualizer (11) + I/O (1) + spacing (2)
+    -- itemsPerPage calculated dynamically: (height - 16 rows for UI) * 2 columns
+    -- Layout: Header(1) + TableHeaders(1) + Items(height-16) + FreeSlots(1) + Filter(1) + Pagination(1) + Separator(1) + Visualizer(10) + I/O(1)
     o.sortBy = "name"
     o.scrollOffset = 0
 
@@ -53,6 +54,58 @@ function MonitorService:new(context)
             STATS = "STA",
             TESTS = "TST",
             SOUND = "SND"
+        },
+        taskColors = {
+            -- IO tasks
+            input_monitor = colors.cyan,
+            input_transfer = colors.cyan,
+            buffer_process = colors.lightBlue,
+            monitor_sync = colors.blue,
+            item_move = colors.lime,
+            -- Storage tasks
+            index_rebuild = colors.yellow,
+            item_scan = colors.orange,
+            index_update = colors.yellow,
+            -- API tasks
+            api_request = colors.orange,
+            api_response = colors.red,
+            -- Test tasks
+            test_run = colors.pink,
+            test_check = colors.magenta,
+            -- Stats tasks
+            uptime_check = colors.green,
+            stats_save = colors.lime,
+            -- Sound tasks
+            play_sound = colors.purple,
+            -- Generic
+            generic = colors.white,
+            error = colors.red
+        },
+        taskSounds = {
+            -- IO tasks - higher pitched for input/output
+            input_monitor = {instrument = "harp", volume = 0.5, pitch = 1.5},
+            input_transfer = {instrument = "harp", volume = 0.4, pitch = 1.6},
+            buffer_process = {instrument = "bass", volume = 0.5, pitch = 1.0},
+            monitor_sync = {instrument = "bell", volume = 0.3, pitch = 0.8},
+            item_move = {instrument = "guitar", volume = 0.4, pitch = 1.3},
+            -- Storage tasks - mid tones
+            index_rebuild = {instrument = "pling", volume = 0.6, pitch = 1.0},
+            item_scan = {instrument = "banjo", volume = 0.4, pitch = 1.2},
+            index_update = {instrument = "pling", volume = 0.3, pitch = 1.4},
+            -- API tasks - distinctive
+            api_request = {instrument = "bit", volume = 0.5, pitch = 1.3},
+            api_response = {instrument = "bit", volume = 0.5, pitch = 0.7},
+            -- Test tasks - playful
+            test_run = {instrument = "flute", volume = 0.4, pitch = 1.4},
+            test_check = {instrument = "chime", volume = 0.4, pitch = 1.1},
+            -- Stats tasks - subtle
+            uptime_check = {instrument = "cow_bell", volume = 0.3, pitch = 0.9},
+            stats_save = {instrument = "cow_bell", volume = 0.3, pitch = 1.1},
+            -- Sound tasks - ironic
+            play_sound = {instrument = "didgeridoo", volume = 0.5, pitch = 1.0},
+            -- Generic/error
+            generic = {instrument = "hat", volume = 0.3, pitch = 1.0},
+            error = {instrument = "bass drum", volume = 0.7, pitch = 0.5}
         }
     }
 
@@ -61,9 +114,21 @@ function MonitorService:new(context)
     o.outputSide = "left"
     self:loadIOConfig()
 
-    -- Item cache to persist data between renders
+    -- Item cache to persist data between renders (updated by background thread)
     o.itemCache = {}
     o.cacheLastUpdate = 0
+
+    -- Free slots cache (updated by background thread every 2 seconds)
+    o.freeSlots = 0
+    o.lastFreeSlots = 0
+
+    -- Dirty flags - only redraw when needed
+    o.dirty = {
+        lists = true,      -- Item lists need redraw
+        freeSlots = true,  -- Free slots display needs redraw
+        header = true,     -- Header needs redraw
+        pagination = true  -- Pagination needs redraw
+    }
 
     return o
 end
@@ -116,6 +181,12 @@ function MonitorService:start()
         self:stackDecayLoop()
     end)
 
+    -- Do initial cache population and screen clear
+    self:refreshCache()
+    self:updateFreeSlots()
+    self.monitor.setBackgroundColor(colors.black)
+    self.monitor.clear()
+
     self.logger:info("MonitorService", "Service started")
 end
 
@@ -160,11 +231,27 @@ end
 function MonitorService:run()
     local processes = {}
 
-    -- Render loop
+    -- UI RENDER THREAD - Fast, no blocking logic
     table.insert(processes, function()
         while self.running do
-            self:render()
-            os.sleep(0.1)
+            self:renderUI()
+            os.sleep(0.05)  -- 20fps UI updates
+        end
+    end)
+
+    -- CACHE UPDATE THREAD - Updates item cache periodically
+    table.insert(processes, function()
+        while self.running do
+            self:refreshCache()
+            os.sleep(0.5)  -- Update cache twice per second
+        end
+    end)
+
+    -- FREE SLOTS UPDATE THREAD - Expensive peripheral calls
+    table.insert(processes, function()
+        while self.running do
+            self:updateFreeSlots()
+            os.sleep(2)  -- Update every 2 seconds
         end
     end)
 
@@ -181,132 +268,143 @@ function MonitorService:run()
     parallel.waitForAny(table.unpack(processes))
 end
 
-function MonitorService:render()
-    -- Refresh cache every render to ensure we have latest data
-    self:refreshCache()
+function MonitorService:renderUI()
+    -- PURE UI RENDERING - No expensive logic, just draw from cached state
+    -- This runs at 20fps and should never block
+    -- Only redraws sections that have changed (dirty flags)
 
     self.monitor.setBackgroundColor(colors.black)
-    self.monitor.clear()
 
-    -- Modern minimalist header
-    self:drawHeader()
+    -- Header (only when dirty)
+    if self.dirty.header then
+        self:drawHeader()
+        self.dirty.header = false
+    end
 
-    -- Table column headers
-    self:drawTableHeaders()
+    -- Table column headers (static, only draw once)
+    if self.dirty.lists then
+        self:drawTableHeaders()
+    end
 
-    -- Letter filter navigation
-    self:drawLetterFilter()
+    -- Items table (only when dirty)
+    if self.dirty.lists then
+        self:drawItemsTable()
+        self.dirty.lists = false
+    end
 
-    -- Items table
-    self:drawItemsTable()
+    -- Free slots info (only when dirty)
+    if self.dirty.freeSlots then
+        self:drawFreeSlots()
+        self.dirty.freeSlots = false
+    end
 
-    -- Pagination (always show if multiple pages)
-    self:drawPagination()
+    -- Letter filter navigation (only when dirty)
+    if self.dirty.lists then
+        self:drawLetterFilter()
+    end
 
-    -- Visualizer at bottom
+    -- Pagination (only when dirty)
+    if self.dirty.pagination then
+        self:drawPagination()
+        self.dirty.pagination = false
+    end
+
+    -- Visualizer at bottom (always update for animation)
     self:drawVisualizer()
 
-    -- I/O indicators at very bottom
+    -- I/O indicators at very bottom (static, draw once on start)
     self:drawIOIndicators()
 end
 
 function MonitorService:drawHeader()
+    -- Draw entire line at once to avoid flicker
     self.monitor.setCursorPos(1, 1)
     self.monitor.setBackgroundColor(colors.gray)
-    self.monitor.clearLine()
-    self.monitor.setTextColor(colors.white)
+
+    -- Build the entire line content
+    local line = string.rep(" ", self.width)
 
     -- Get total item count
     local items = self:getAllItems()
     local uniqueCount = #items
 
-    -- Left side: Title
-    self.monitor.setCursorPos(2, 1)
-    self.monitor.write(string.format("STORAGE | %d Items", uniqueCount))
+    -- Build header content
+    local title = string.format(" STORAGE | %d Items", uniqueCount)
 
     -- Right side: Sort buttons
     local sortX = self.width - 18
-    self.monitor.setCursorPos(sortX, 1)
-    self.monitor.setTextColor(colors.lightGray)
-    self.monitor.write("Sort:")
-
-    -- Name sort button
-    self.monitor.setCursorPos(sortX + 6, 1)
+    local sortText = "Sort: "
     if self.sortBy == "name" then
-        self.monitor.setTextColor(colors.lime)
-        self.monitor.write("[Name]")
+        sortText = sortText .. "[Name]  Count "
     else
-        self.monitor.setTextColor(colors.white)
-        self.monitor.write(" Name ")
+        sortText = sortText .. " Name  [Count]"
     end
 
-    -- Count sort button
-    self.monitor.setCursorPos(sortX + 12, 1)
-    if self.sortBy == "count" then
-        self.monitor.setTextColor(colors.lime)
-        self.monitor.write("[Count]")
-    else
-        self.monitor.setTextColor(colors.white)
-        self.monitor.write(" Count ")
-    end
+    -- Combine into single line
+    line = title .. string.rep(" ", sortX - #title - 1) .. sortText
+
+    -- Write entire line in one operation
+    self.monitor.setTextColor(colors.white)
+    self.monitor.write(line)
 
     self.monitor.setBackgroundColor(colors.black)
 end
 
 function MonitorService:drawLetterFilter()
-    self.monitor.setCursorPos(1, 2)
+    local y = self.height - 13
+    self.monitor.setCursorPos(1, y)
     self.monitor.setBackgroundColor(colors.black)
-    self.monitor.clearLine()
+
+    -- Build entire line
+    local line = string.rep(" ", self.width)
 
     if self.currentLetter then
-        -- Show back button when filtered
-        self.monitor.setTextColor(colors.yellow)
-        self.monitor.write("[X]")
-        self.monitor.setTextColor(colors.white)
-        self.monitor.write(" " .. self.currentLetter:upper())
+        -- Show back button when filtered (centered)
+        local filterText = "[X] " .. self.currentLetter:upper()
+        local startX = math.max(1, math.floor((self.width - #filterText) / 2))
+        line = string.rep(" ", startX) .. filterText .. string.rep(" ", self.width - startX - #filterText)
     else
-        -- Show letter navigation
-        self.monitor.setTextColor(colors.gray)
-        self.monitor.write("#")
-
-        for i = 1, 26 do
-            local letter = string.char(96 + i)  -- a-z
-            self.monitor.setTextColor(colors.lightGray)
-            self.monitor.write(letter)
-        end
+        -- Show letter navigation (centered)
+        local filterText = "#abcdefghijklmnopqrstuvwxyz"
+        local startX = math.max(1, math.floor((self.width - #filterText) / 2))
+        line = string.rep(" ", startX) .. filterText .. string.rep(" ", self.width - startX - #filterText)
     end
 
-    self.monitor.setBackgroundColor(colors.black)
+    -- Write entire line
+    self.monitor.setTextColor(colors.lightGray)
+    self.monitor.write(line)
 end
 
 function MonitorService:drawTableHeaders()
-    self.monitor.setCursorPos(1, 3)
-    self.monitor.setBackgroundColor(colors.gray)
-    self.monitor.clearLine()
-    self.monitor.setTextColor(colors.white)
-
-    -- Two-column layout
+    -- Build entire header line
     local columnWidth = math.floor(self.width / 2)
-    local nameWidth = columnWidth - 13  -- Space for name in each column
+    local nameWidth = columnWidth - 13
     local countWidth = 6
-    local stacksWidth = 6
 
-    -- Left column header
-    self.monitor.setCursorPos(2, 3)
-    self.monitor.write("ITEM")
-    self.monitor.setCursorPos(nameWidth + 2, 3)
-    self.monitor.write("COUNT")
-    self.monitor.setCursorPos(nameWidth + countWidth + 3, 3)
-    self.monitor.write("STACKS")
+    local line = string.rep(" ", self.width)
+    local chars = {}
+    for i = 1, self.width do chars[i] = " " end
 
-    -- Right column header
-    self.monitor.setCursorPos(columnWidth + 2, 3)
-    self.monitor.write("ITEM")
-    self.monitor.setCursorPos(columnWidth + nameWidth + 2, 3)
-    self.monitor.write("COUNT")
-    self.monitor.setCursorPos(columnWidth + nameWidth + countWidth + 3, 3)
-    self.monitor.write("STACKS")
+    -- Left column headers
+    local leftHeaders = " ITEM" .. string.rep(" ", nameWidth - 4) .. "COUNT" .. string.rep(" ", countWidth - 4) .. "STACK"
+    for i = 1, #leftHeaders do
+        chars[i] = leftHeaders:sub(i, i)
+    end
 
+    -- Right column headers (offset by +1 for divider)
+    local offset = columnWidth + 2
+    local rightHeaders = "ITEM" .. string.rep(" ", nameWidth - 3) .. "COUNT" .. string.rep(" ", countWidth - 4) .. "STACK"
+    for i = 1, math.min(#rightHeaders, self.width - offset) do
+        chars[offset + i] = rightHeaders:sub(i, i)
+    end
+
+    line = table.concat(chars)
+
+    -- Write entire line
+    self.monitor.setCursorPos(1, 2)
+    self.monitor.setBackgroundColor(colors.gray)
+    self.monitor.setTextColor(colors.white)
+    self.monitor.write(line)
     self.monitor.setBackgroundColor(colors.black)
 end
 
@@ -326,26 +424,20 @@ function MonitorService:drawItemsTable()
     local columnWidth = math.floor(self.width / 2)
     local nameWidth = columnWidth - 13
     local countWidth = 6
-    local stacksWidth = 6
+    local stacksWidth = 5
 
-    -- Calculate available rows (from line 4 to line before pagination)
-    local startY = 4
-    local paginationY = self.height - 12
-    local maxRows = paginationY - startY
+    -- Calculate available rows (from line 3 to line before free slots)
+    local startY = 3
+    local endY = self.height - 14
+    local maxRows = endY - startY + 1
 
     -- Calculate items per page (rows per column * 2 columns)
     local itemsPerPage = maxRows * 2
     local startIdx = (self.currentPage - 1) * itemsPerPage + 1
     local endIdx = math.min(startIdx + itemsPerPage - 1, #items)
 
-    -- Clear all item rows first
-    for y = startY, paginationY - 1 do
-        self.monitor.setCursorPos(1, y)
-        self.monitor.setBackgroundColor(colors.black)
-        self.monitor.clearLine()
-    end
-
-    -- Draw items, favoring left column (fill left completely before moving to right)
+    -- Build map of which items go in which row/column
+    local rowItems = {}  -- rowItems[row] = {left = item, right = item}
     for i = startIdx, endIdx do
         local item = items[i]
         local itemOffset = i - startIdx
@@ -356,26 +448,84 @@ function MonitorService:drawItemsTable()
         local row, column
         if itemOffset < leftColumnItems then
             -- Left column
-            column = 0
-            row = itemOffset
+            column = "left"
+            row = itemOffset + 1  -- 1-indexed
         else
             -- Right column
-            column = 1
-            row = itemOffset - leftColumnItems
+            column = "right"
+            row = itemOffset - leftColumnItems + 1  -- 1-indexed
         end
 
-        -- Only draw if we have space
-        if row < maxRows then
-            local y = startY + row
-            local xOffset = column * columnWidth
+        if row >= 1 and row <= maxRows then
+            if not rowItems[row] then
+                rowItems[row] = {}
+            end
+            rowItems[row][column] = item
+        end
+    end
 
-            -- Alternating background colors for rows
-            local bgColor = (row % 2 == 0) and colors.lightGray or colors.white
+    -- Draw each row
+    for row = 1, maxRows do
+        local y = startY + row - 1
 
-            -- Clear the section for this item
+        -- Clear entire row with black background first
+        self.monitor.setCursorPos(1, y)
+        self.monitor.setBackgroundColor(colors.black)
+        self.monitor.write(string.rep(" ", self.width))
+
+        -- Alternating background color
+        local bgColor = (row % 2 == 0) and colors.lightGray or colors.white
+
+        -- Draw left column item if exists
+        if rowItems[row] and rowItems[row].left then
+            local item = rowItems[row].left
+            local xOffset = 0
+
+            -- Draw background
             self.monitor.setCursorPos(xOffset + 1, y)
             self.monitor.setBackgroundColor(bgColor)
             self.monitor.write(string.rep(" ", columnWidth))
+
+            -- Item name
+            self.monitor.setCursorPos(xOffset + 2, y)
+            self.monitor.setTextColor(colors.black)
+            local name = item.key:match("([^:]+)$") or item.key
+            if #name > nameWidth - 1 then
+                name = name:sub(1, nameWidth - 3) .. "..."
+            end
+            self.monitor.write(name)
+
+            -- Count (in lime color)
+            local count = item.value and item.value.count or 0
+            local countStr = tostring(count)
+            if #countStr > countWidth then
+                countStr = countStr:sub(1, countWidth)
+            end
+            self.monitor.setCursorPos(xOffset + nameWidth + 2, y)
+            self.monitor.setTextColor(colors.lime)
+            self.monitor.write(countStr)
+
+            -- Stacks (in orange color)
+            local stackSize = item.value and item.value.stackSize or 64
+            local stacks = math.ceil(count / stackSize)
+            local stackStr = tostring(stacks)
+            if #stackStr > stacksWidth then
+                stackStr = stackStr:sub(1, stacksWidth)
+            end
+            self.monitor.setCursorPos(xOffset + nameWidth + countWidth + 3, y)
+            self.monitor.setTextColor(colors.orange)
+            self.monitor.write(stackStr)
+        end
+
+        -- Draw right column item if exists (offset by +1 for divider)
+        if rowItems[row] and rowItems[row].right then
+            local item = rowItems[row].right
+            local xOffset = columnWidth + 1
+
+            -- Draw background (1 char narrower for divider)
+            self.monitor.setCursorPos(xOffset + 1, y)
+            self.monitor.setBackgroundColor(bgColor)
+            self.monitor.write(string.rep(" ", columnWidth - 1))
 
             -- Item name
             self.monitor.setCursorPos(xOffset + 2, y)
@@ -412,28 +562,69 @@ function MonitorService:drawItemsTable()
     self.monitor.setBackgroundColor(colors.black)
 end
 
+function MonitorService:updateFreeSlots()
+    -- Calculate total free slots from storage service
+    -- Called by background thread every 2 seconds
+    local freeSlots = 0
+    if self.context.services and self.context.services.storage then
+        local storageService = self.context.services.storage
+        if storageService.storageMap then
+            for _, storage in ipairs(storageService.storageMap) do
+                if not storage.isME then
+                    -- For regular inventories, count free slots
+                    local inv = peripheral.wrap(storage.name)
+                    if inv and inv.list and inv.size then
+                        local items = inv.list()
+                        local totalSlots = inv.size()
+                        local usedSlots = 0
+                        for _ in pairs(items) do
+                            usedSlots = usedSlots + 1
+                        end
+                        freeSlots = freeSlots + (totalSlots - usedSlots)
+                    end
+                end
+                -- ME systems have unlimited slots, don't count
+            end
+        end
+    end
+
+    -- Only mark dirty if changed
+    if freeSlots ~= self.freeSlots then
+        self.freeSlots = freeSlots
+        self.dirty.freeSlots = true
+    end
+end
+
+function MonitorService:drawFreeSlots()
+    local y = self.height - 14
+
+    -- Build entire line
+    local freeSlotsText = string.format("Free Slots: %d", self.freeSlots)
+    local startX = math.max(0, math.floor((self.width - #freeSlotsText) / 2))
+    local line = string.rep(" ", startX) .. freeSlotsText .. string.rep(" ", self.width - startX - #freeSlotsText)
+
+    self.monitor.setCursorPos(1, y)
+    self.monitor.setBackgroundColor(colors.black)
+    self.monitor.setTextColor(colors.gray)
+    self.monitor.write(line)
+end
+
 function MonitorService:drawPagination()
     -- Use filtered items if a letter is selected
     local items = self.currentLetter and self:getFilteredItems() or self:getAllItems()
 
     -- Calculate items per page dynamically based on available rows
-    local startY = 4
-    local paginationY = self.height - 12
-    local maxRows = paginationY - startY
+    local startY = 3
+    local endY = self.height - 14
+    local maxRows = endY - startY + 1
     local itemsPerPage = maxRows * 2  -- Two columns
 
     local totalPages = math.ceil(#items / itemsPerPage)
 
     if totalPages <= 1 then return end
 
-    -- Draw pagination at paginationY (just above the separator line)
-
-    -- Clear the line first
-    self.monitor.setCursorPos(1, paginationY)
-    self.monitor.setBackgroundColor(colors.black)
-    self.monitor.clearLine()
-
-    self.monitor.setTextColor(colors.gray)
+    -- Draw pagination at height - 12
+    local paginationY = self.height - 12
 
     -- Build simple, clean pagination string
     local paginationStr = string.format("Page %d/%d", self.currentPage, totalPages)
@@ -447,10 +638,15 @@ function MonitorService:drawPagination()
         paginationStr = paginationStr .. " >"
     end
 
-    -- Center the pagination
-    local x = math.max(1, math.floor((self.width - #paginationStr) / 2) + 1)
-    self.monitor.setCursorPos(x, paginationY)
-    self.monitor.write(paginationStr)
+    -- Build entire line with centered pagination
+    local startX = math.max(0, math.floor((self.width - #paginationStr) / 2))
+    local line = string.rep(" ", startX) .. paginationStr .. string.rep(" ", self.width - startX - #paginationStr)
+
+    -- Write entire line at once
+    self.monitor.setCursorPos(1, paginationY)
+    self.monitor.setBackgroundColor(colors.black)
+    self.monitor.setTextColor(colors.gray)
+    self.monitor.write(line)
 end
 
 function MonitorService:drawAllItems()
@@ -542,13 +738,22 @@ end
 function MonitorService:drawVisualizer()
     local startY = self.height - 11
 
-    -- Draw separator
+    -- Draw separator line
     self.monitor.setCursorPos(1, startY)
     self.monitor.setBackgroundColor(colors.black)
     self.monitor.setTextColor(colors.gray)
     self.monitor.write(string.rep("-", self.width))
 
     startY = startY + 1
+
+    -- Build visualizer in memory first (10 rows)
+    local rows = {}
+    for i = 1, 10 do
+        rows[i] = {}
+        for j = 1, self.width do
+            rows[i][j] = {char = " ", color = colors.black, bg = colors.black}
+        end
+    end
 
     -- Calculate total width needed for all pools
     local totalWidth = 0
@@ -557,76 +762,107 @@ function MonitorService:drawVisualizer()
         table.insert(poolOrder, {name = poolName, pool = pool})
         totalWidth = totalWidth + (#pool.workers * 2) + 2
     end
-    totalWidth = totalWidth - 2  -- Remove extra spacing after last pool
+    totalWidth = totalWidth - 2
 
-    -- Center the visualizer and shift left by 1 (was +5, now -1)
     local startX = math.floor((self.width - totalWidth) / 2) - 1
     local x = startX
 
-    -- Draw each pool with labels
+    -- Build each pool in memory
     for _, entry in ipairs(poolOrder) do
         local poolName = entry.name
         local pool = entry.pool
 
         if x + (#pool.workers * 2) > self.width then break end
 
-        -- Draw stacks
         for w, worker in ipairs(pool.workers) do
             local stackX = x + (w - 1) * 2
 
-            -- Draw stack from bottom up
-            for h = 1, math.min(#worker.stack, self.visualizer.maxHeight - 2) do
-                local stackY = startY + self.visualizer.maxHeight - 2 - h
-                local stackItem = worker.stack[h]
+            if stackX >= 1 and stackX <= self.width then
+                -- Draw stacks
+                for h = 1, math.min(#worker.stack, self.visualizer.maxHeight - 2) do
+                    local rowIdx = self.visualizer.maxHeight - 2 - h + 1
+                    local stackItem = worker.stack[h]
+                    if stackItem and rowIdx >= 1 and rowIdx <= 10 then
+                        rows[rowIdx][stackX] = {char = "\138", color = stackItem.color, bg = colors.black}
+                    end
+                end
 
-                if stackItem then
-                    self.monitor.setCursorPos(stackX, stackY)
-                    self.monitor.setTextColor(stackItem.color)
-                    self.monitor.write("\138")
+                -- Worker number
+                local workerRow = self.visualizer.maxHeight - 2 + 1
+                if workerRow >= 1 and workerRow <= 10 then
+                    rows[workerRow][stackX] = {char = tostring(w), color = pool.color, bg = colors.black}
                 end
             end
-
-            -- Draw worker number
-            self.monitor.setCursorPos(stackX, startY + self.visualizer.maxHeight - 2)
-            self.monitor.setTextColor(pool.color)
-            self.monitor.write(tostring(w))
         end
 
-        -- Draw pool label
+        -- Pool label
         local label = self.visualizer.labels[poolName] or poolName
         local labelX = x + math.floor((#pool.workers * 2 - #label) / 2)
-        self.monitor.setCursorPos(labelX, startY + self.visualizer.maxHeight - 1)
-        self.monitor.setTextColor(pool.color)
-        self.monitor.write(label)
+        local labelRow = self.visualizer.maxHeight - 1 + 1
+        if labelRow >= 1 and labelRow <= 10 then
+            for i = 1, #label do
+                local col = labelX + i - 1
+                if col >= 1 and col <= self.width then
+                    rows[labelRow][col] = {char = label:sub(i, i), color = pool.color, bg = colors.black}
+                end
+            end
+        end
 
         x = x + (#pool.workers * 2) + 2
+    end
+
+    -- Draw all rows at once
+    for i = 1, 10 do
+        local y = startY + i - 1
+        self.monitor.setCursorPos(1, y)
+        self.monitor.setBackgroundColor(colors.black)
+
+        local line = ""
+        for j = 1, self.width do
+            line = line .. rows[i][j].char
+        end
+        self.monitor.setTextColor(colors.white)
+        self.monitor.write(line)
     end
 end
 
 function MonitorService:drawIOIndicators()
     local y = self.height
 
-    -- Input indicator
-    if self.inputSide == "left" then
-        self.monitor.setCursorPos(1, y)
-    else
-        self.monitor.setCursorPos(self.width - 5, y)
-    end
-    self.monitor.setTextColor(colors.lime)
-    self.monitor.write("INPUT")
+    -- Build entire bottom line in memory
+    local chars = {}
+    for i = 1, self.width do chars[i] = " " end
 
-    -- Output indicator
-    if self.outputSide == "left" then
-        self.monitor.setCursorPos(1, y)
-    else
-        self.monitor.setCursorPos(self.width - 6, y)
+    -- Place INPUT at correct position
+    local inputText = "INPUT"
+    local inputPos = self.inputSide == "left" and 1 or (self.width - 5)
+    for i = 1, #inputText do
+        if inputPos + i - 1 >= 1 and inputPos + i - 1 <= self.width then
+            chars[inputPos + i - 1] = inputText:sub(i, i)
+        end
     end
-    self.monitor.setTextColor(colors.red)
-    self.monitor.write("OUTPUT")
+
+    -- Place OUTPUT at correct position
+    local outputText = "OUTPUT"
+    local outputPos = self.outputSide == "left" and 1 or (self.width - 6)
+    for i = 1, #outputText do
+        if outputPos + i - 1 >= 1 and outputPos + i - 1 <= self.width then
+            chars[outputPos + i - 1] = outputText:sub(i, i)
+        end
+    end
+
+    -- Write entire line at once
+    local line = table.concat(chars)
+    self.monitor.setCursorPos(1, y)
+    self.monitor.setBackgroundColor(colors.black)
+    self.monitor.setTextColor(colors.white)
+    self.monitor.write(line)
 end
 
 function MonitorService:initializeVisualizer()
     local pools = self.context.scheduler:getPools()
+
+    self.logger:info("MonitorService", "Initializing visualizer pools...")
 
     for poolName, pool in pairs(pools) do
         local upperName = poolName:upper()
@@ -636,13 +872,19 @@ function MonitorService:initializeVisualizer()
             color = self.visualizer.colors[upperName] or colors.white
         }
 
-        for i = 1, math.min(pool.size, 4) do
+        local workerCount = math.min(pool.size, 4)
+        for i = 1, workerCount do
             self.visualizer.pools[upperName].workers[i] = {
                 id = i,
                 stack = {},
                 idle = true
             }
         end
+
+        self.logger:info("MonitorService", string.format(
+            "Pool '%s': %d workers (pool has %d total)",
+            upperName, workerCount, pool.size
+        ))
     end
 end
 
@@ -650,16 +892,46 @@ function MonitorService:onTaskStart(data)
     local poolName = data.pool:upper()
     local pool = self.visualizer.pools[poolName]
 
-    if pool and pool.workers[data.worker] then
-        local worker = pool.workers[data.worker]
-        worker.idle = false
+    self.logger:warn("MonitorService", string.format(
+        "[VISUAL] onTaskStart: pool=%s, worker=%d, taskType=%s",
+        poolName, data.worker or -1, data.taskType or "nil"
+    ))
 
-        table.insert(worker.stack, 1, {
-            color = colors.white,
-            type = "start",
-            time = os.epoch("utc") / 1000
-        })
+    if not pool then
+        self.logger:warn("MonitorService", string.format(
+            "[VISUAL] Pool '%s' not found in visualizer", poolName
+        ))
+        return
     end
+
+    if not pool.workers[data.worker] then
+        self.logger:warn("MonitorService", string.format(
+            "[VISUAL] Worker %d not found in pool '%s' (has %d workers)",
+            data.worker, poolName, #pool.workers
+        ))
+        return
+    end
+
+    local worker = pool.workers[data.worker]
+    worker.idle = false
+
+    local taskType = data.taskType or "generic"
+    local barColor = self.visualizer.taskColors[taskType] or colors.white
+
+    table.insert(worker.stack, 1, {
+        color = barColor,
+        type = "start",
+        taskType = taskType,
+        time = os.epoch("utc") / 1000
+    })
+
+    self.logger:warn("MonitorService", string.format(
+        "[VISUAL] Added bar: pool=%s, worker=%d, taskType=%s, color=%d",
+        poolName, data.worker, taskType, barColor
+    ))
+
+    -- Play sound for this task type
+    self:playTaskSound(taskType)
 end
 
 function MonitorService:onTaskEnd(data)
@@ -669,13 +941,61 @@ function MonitorService:onTaskEnd(data)
     if pool and pool.workers[data.worker] then
         local worker = pool.workers[data.worker]
 
+        local taskType = data.taskType or "generic"
+        local barColor = self.visualizer.taskColors[taskType] or colors.lime
+
         table.insert(worker.stack, 1, {
-            color = colors.lime,
+            color = barColor,
             type = "end",
+            taskType = taskType,
             time = os.epoch("utc") / 1000
         })
 
         worker.idle = true
+
+        -- Play completion sound (slightly different pitch)
+        self:playTaskSound(taskType, true)
+    end
+end
+
+function MonitorService:playTaskSound(taskType, isCompletion)
+    local soundConfig = self.visualizer.taskSounds[taskType]
+
+    if not soundConfig then
+        soundConfig = self.visualizer.taskSounds.generic
+        self.logger:warn("MonitorService", string.format(
+            "[SOUND] No sound config for taskType '%s', using generic", taskType
+        ))
+    end
+
+    -- Get sound settings or default
+    local settings = self.context.settings or {}
+    local soundEnabled = settings.soundEnabled
+    if soundEnabled == nil then
+        soundEnabled = true  -- Default to enabled
+    end
+
+    if not soundEnabled then
+        self.logger:warn("MonitorService", "[SOUND] Sound disabled in settings")
+        return  -- Sound disabled
+    end
+
+    -- Adjust pitch slightly for completion events
+    local pitch = soundConfig.pitch
+    if isCompletion then
+        pitch = pitch * 1.2  -- Higher pitch for completion
+    end
+
+    -- Play the sound using noteblock peripheral if available
+    local noteblock = peripheral.find("minecraft:note_block")
+    if noteblock then
+        self.logger:warn("MonitorService", string.format(
+            "[SOUND] Playing: taskType=%s, instrument=%s, pitch=%.1f",
+            taskType, soundConfig.instrument, pitch
+        ))
+        noteblock.playNote(soundConfig.instrument, soundConfig.volume, pitch)
+    else
+        self.logger:warn("MonitorService", "[SOUND] No noteblock peripheral found")
     end
 end
 
@@ -683,6 +1003,11 @@ function MonitorService:onItemAdded(data)
     local itemKey = data.key or data.item
     self.itemColors[itemKey] = "new"
     self.itemTimers[itemKey] = os.epoch("utc") / 1000
+
+    -- Mark UI as dirty
+    self.dirty.lists = true
+    self.dirty.header = true
+    self.dirty.pagination = true
 
     -- Update cache
     self:refreshCache()
@@ -695,6 +1020,9 @@ function MonitorService:onItemUpdated(data)
         self.itemTimers[itemName] = os.epoch("utc") / 1000
     end
 
+    -- Mark lists as dirty
+    self.dirty.lists = true
+
     -- Update cache
     self:refreshCache()
 end
@@ -706,39 +1034,31 @@ function MonitorService:onIndexRebuilt(data)
         data.uniqueItems or 0, data.totalStacks or 0
     ))
 
-    -- Force cache refresh
-    self:refreshCache()
+    -- Mark all UI as dirty
+    self.dirty.lists = true
+    self.dirty.header = true
+    self.dirty.pagination = true
+    self.dirty.freeSlots = true
 
-    -- Verify we can actually get items
-    local items = self:getAllItems()
-    self.logger:info("MonitorService", string.format("getAllItems() returned %d items (from cache: %d)",
-        #items, #self.itemCache))
-
-    if #items > 0 then
-        self.logger:info("MonitorService", "Sample items:")
-        for i = 1, math.min(3, #items) do
-            self.logger:info("MonitorService", string.format("  %d. %s (count: %d)",
-                i, items[i].key, items[i].value and items[i].value.count or 0))
-        end
-    else
-        self.logger:warn("MonitorService", "NO ITEMS returned from getAllItems()!")
-    end
-
-    -- Force a render to show the updated items
-    if self.running then
-        self.logger:info("MonitorService", "Triggering render...")
-        self:render()
-    else
-        self.logger:warn("MonitorService", "Not rendering - monitor not running yet")
-    end
+    -- Note: Cache will be refreshed by background thread
+    -- UI will update automatically on next render cycle
 end
 
 function MonitorService:refreshCache()
     -- Refresh cache from storage service
     if self.context.services and self.context.services.storage then
+        local oldCount = #self.itemCache
         local items = self.context.services.storage:getItems()
         self.itemCache = items
         self.cacheLastUpdate = os.epoch("utc") / 1000
+
+        -- Mark dirty if item count changed
+        if #items ~= oldCount then
+            self.dirty.lists = true
+            self.dirty.header = true
+            self.dirty.pagination = true
+        end
+
         self.logger:debug("MonitorService", string.format("Cache refreshed: %d items", #self.itemCache))
     end
 end
@@ -752,6 +1072,11 @@ function MonitorService:updateCache(items, uniqueCount)
 
     self.itemCache = items
     self.cacheLastUpdate = os.epoch("utc") / 1000
+
+    -- Mark all UI as dirty
+    self.dirty.lists = true
+    self.dirty.header = true
+    self.dirty.pagination = true
 
     self.logger:info("MonitorService", string.format(
         "Cache updated via direct sync: %d items stored", #self.itemCache
@@ -772,57 +1097,21 @@ function MonitorService:updateCache(items, uniqueCount)
 end
 
 function MonitorService:getAllItems()
-    self.logger:info("MonitorService", string.format(
-        "getAllItems called: cache has %d items", #self.itemCache
-    ))
+    -- PURE FUNCTION - Only reads from cache, no expensive operations
+    -- Cache is updated by background thread
 
-    -- Use cached items if available
-    if #self.itemCache > 0 then
-        local items = self.itemCache
-        self.logger:info("MonitorService", string.format("Using cached items: %d", #items))
+    local items = self.itemCache
 
-        -- Sort items
-        table.sort(items, function(a, b)
-            if self.sortBy == "count" then
-                return (a.value.count or 0) > (b.value.count or 0)
-            else
-                return a.key < b.key
-            end
-        end)
-
-        return items
-    end
-
-    -- Fallback: try to get from storage service
-    self.logger:warn("MonitorService", "Cache is empty, trying storage service...")
-
-    if self.context.services and self.context.services.storage then
-        local items = self.context.services.storage:getItems()
-
-        self.logger:info("MonitorService", string.format(
-            "Storage service returned %d items (cache was empty)", #items
-        ))
-
-        -- Update cache
-        if #items > 0 then
-            self.itemCache = items
-            self.cacheLastUpdate = os.epoch("utc") / 1000
+    -- Sort items
+    table.sort(items, function(a, b)
+        if self.sortBy == "count" then
+            return (a.value.count or 0) > (b.value.count or 0)
+        else
+            return a.key < b.key
         end
+    end)
 
-        -- Sort items
-        table.sort(items, function(a, b)
-            if self.sortBy == "count" then
-                return (a.value.count or 0) > (b.value.count or 0)
-            else
-                return a.key < b.key
-            end
-        end)
-
-        return items
-    else
-        self.logger:error("MonitorService", "Storage service not available and cache is empty!")
-        return {}
-    end
+    return items
 end
 
 function MonitorService:getFilteredItems()
@@ -851,34 +1140,54 @@ function MonitorService:getFilteredItems()
 end
 
 function MonitorService:handleClick(x, y)
+    local changed = false
+
     -- Header: Sort buttons
     if y == 1 then
         local sortX = self.width - 18
         -- Name sort button (positions sortX+6 to sortX+11)
         if x >= sortX + 6 and x <= sortX + 11 then
-            self.sortBy = "name"
+            if self.sortBy ~= "name" then
+                self.sortBy = "name"
+                changed = true
+            end
         -- Count sort button (positions sortX+12 to sortX+18)
         elseif x >= sortX + 12 and x <= sortX + 18 then
-            self.sortBy = "count"
+            if self.sortBy ~= "count" then
+                self.sortBy = "count"
+                changed = true
+            end
         end
     end
 
-    -- Letter navigation (line 2)
-    if y == 2 then
+    -- Letter navigation (now at height - 13, centered)
+    local letterFilterY = self.height - 13
+    if y == letterFilterY then
         if self.currentLetter then
-            -- Click [X] to go back (positions 1-3)
-            if x >= 1 and x <= 3 then
+            -- Click [X] to go back (centered position)
+            local filterText = "[X] " .. self.currentLetter:upper()
+            local startX = math.max(1, math.floor((self.width - #filterText) / 2) + 1)
+            if x >= startX and x <= startX + 2 then
                 self.currentLetter = nil
                 self.currentPage = 1
+                changed = true
             end
         else
-            -- Click on letters to filter
-            if x == 1 then
+            -- Click on letters to filter (centered, 27 chars total)
+            local totalLength = 27
+            local startX = math.max(1, math.floor((self.width - totalLength) / 2) + 1)
+            local relativeX = x - startX + 1
+
+            if relativeX == 1 then
+                -- Clicked on #
                 self.currentLetter = "#"
                 self.currentPage = 1
-            elseif x >= 2 and x <= 27 then
-                self.currentLetter = string.char(96 + x - 1)
+                changed = true
+            elseif relativeX >= 2 and relativeX <= 27 then
+                -- Clicked on a-z
+                self.currentLetter = string.char(96 + relativeX - 1)
                 self.currentPage = 1
+                changed = true
             end
         end
     end
@@ -889,8 +1198,9 @@ function MonitorService:handleClick(x, y)
         local items = self.currentLetter and self:getFilteredItems() or self:getAllItems()
 
         -- Calculate items per page dynamically
-        local startY = 4
-        local maxRows = paginationY - startY
+        local startY = 3
+        local endY = self.height - 14
+        local maxRows = endY - startY + 1
         local itemsPerPage = maxRows * 2  -- Two columns
         local totalPages = math.ceil(#items / itemsPerPage)
 
@@ -899,11 +1209,20 @@ function MonitorService:handleClick(x, y)
             -- Previous page (left side, clicking "<")
             if x <= 5 and self.currentPage > 1 then
                 self.currentPage = self.currentPage - 1
+                changed = true
             -- Next page (right side, clicking ">")
             elseif x >= self.width - 5 and self.currentPage < totalPages then
                 self.currentPage = self.currentPage + 1
+                changed = true
             end
         end
+    end
+
+    -- Mark UI dirty if anything changed
+    if changed then
+        self.dirty.lists = true
+        self.dirty.header = true
+        self.dirty.pagination = true
     end
 end
 

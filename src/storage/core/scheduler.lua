@@ -68,7 +68,8 @@ function Scheduler:workerLoop(poolName, workerId)
                 pool = poolName,
                 worker = workerId,
                 task = task.id,
-                label = worker.label
+                label = worker.label,
+                taskType = task.taskType or "generic"
             })
 
             local ok, result = pcall(task.fn)
@@ -78,7 +79,8 @@ function Scheduler:workerLoop(poolName, workerId)
                 self.eventBus:publish("task.end", {
                     pool = poolName,
                     worker = workerId,
-                    task = task.id
+                    task = task.id,
+                    taskType = task.taskType or "generic"
                 })
             else
                 task.future:reject(result)
@@ -86,6 +88,7 @@ function Scheduler:workerLoop(poolName, workerId)
                     pool = poolName,
                     worker = workerId,
                     task = task.id,
+                    taskType = task.taskType or "generic",
                     error = result
                 })
             end
@@ -99,7 +102,7 @@ function Scheduler:workerLoop(poolName, workerId)
     end
 end
 
-function Scheduler:submit(poolName, fn)
+function Scheduler:submit(poolName, fn, taskType)
     local pool = self.pools[poolName]
     if not pool then
         error("Unknown pool: " .. poolName)
@@ -113,7 +116,8 @@ function Scheduler:submit(poolName, fn)
     local task = {
         id = taskId,
         fn = fn,
-        future = future
+        future = future,
+        taskType = taskType or "generic"  -- Default to generic if not specified
     }
 
     table.insert(pool.queue, task)

@@ -33,13 +33,32 @@ function Bootstrap:discover()
     local largestStorage = nil
     local largestSize = 0
 
-    -- Scan all inventories
+    -- Scan all inventories and ME interfaces
     self.logger:info("Bootstrap", string.format("Scanning %d peripherals...", #peripherals))
     for _, name in ipairs(peripherals) do
         local pType = peripheral.getType(name)
 
-        -- Check if it's an inventory
-        if pType and self:isInventory(pType) then
+        -- Check if it's an ME interface
+        if pType and self:isMEInterface(pType) then
+            local p = peripheral.wrap(name)
+            if p then
+                local storage = {
+                    id = #storages + 1,
+                    name = name,
+                    type = pType,
+                    isME = true,
+                    size = 0  -- ME systems have dynamic size
+                }
+
+                table.insert(storages, storage)
+
+                self.logger:info("Bootstrap", string.format(
+                        "Found ME Interface [%d]: %s (%s)",
+                        storage.id, name, pType
+                ))
+            end
+        -- Check if it's a regular inventory
+        elseif pType and self:isInventory(pType) then
             local p = peripheral.wrap(name)
             if p and p.size then
                 local size = p.size()
@@ -47,6 +66,7 @@ function Bootstrap:discover()
                     id = #storages + 1,
                     name = name,
                     type = pType,
+                    isME = false,
                     size = size
                 }
 
@@ -66,7 +86,7 @@ function Bootstrap:discover()
         else
             if pType then
                 self.logger:debug("Bootstrap", string.format(
-                    "Skipping non-inventory: %s (%s)", name, pType
+                    "Skipping: %s (%s)", name, pType
                 ))
             end
         end
@@ -131,6 +151,13 @@ function Bootstrap:isInventory(pType)
     end
 
     return false
+end
+
+function Bootstrap:isMEInterface(pType)
+    -- Check for Applied Energistics 2 ME interfaces
+    return pType:lower():find("me_interface") or
+           pType:lower():find("meinterface") or
+           pType == "ME Interface"
 end
 
 function Bootstrap:loadConfig(config)
