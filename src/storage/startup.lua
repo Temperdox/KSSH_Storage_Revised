@@ -69,6 +69,7 @@ local function startup()
     local StatsPage = require("ui.pages.stats_page")
     local TestsPage = require("ui.pages.tests_page")
     local SettingsPage = require("ui.pages.settings_page")
+    local NetPage = require("ui.pages.net_page")
 
     -- Command modules
     local CommandFactory = require("factories.command_factory")
@@ -273,6 +274,7 @@ local function startup()
     router:register("stats", StatsPage:new(context))
     router:register("tests", TestsPage:new(context))
     router:register("settings", SettingsPage:new(context))
+    router:register("net", NetPage:new(context))
 
     -- Navigate to console page
     router:navigate("console")

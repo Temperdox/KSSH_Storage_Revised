@@ -170,6 +170,12 @@ function ConsolePage:drawHeader()
     term.write("Stats")
     self.navLinks.stats = {x1 = x, x2 = x + 4, y = 1, page = "stats"}
 
+    x = x - 6
+    term.setCursorPos(x, 1)
+    term.setTextColor(colors.cyan)
+    term.write("Net")
+    self.navLinks.net = {x1 = x, x2 = x + 2, y = 1, page = "net"}
+
     term.setBackgroundColor(colors.black)
 end
 
@@ -635,7 +641,7 @@ function ConsolePage:autocomplete()
 end
 
 function ConsolePage:showHelp()
-    self.logger:info("Help", "Navigation: S=Stats, T=Tests, X=Settings")
+    self.logger:info("Help", "Navigation: S=Stats, T=Tests, N=Net, X=Settings")
     self.logger:info("Help", "Scrolling: PgUp/PgDown, Home/End")
     self.logger:info("Help", "Commands: Type and press Enter, Tab for autocomplete")
     self.logger:info("Help", "History: Up/Down arrows")
