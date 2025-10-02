@@ -1,57 +1,6 @@
 local NetPage = {}
 NetPage.__index = NetPage
 
--- XOR encryption with salt
-local function encryptCode(plaintext, salt)
-    local key = "KSSH_SECURE_2025"
-    local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
-    local saltValue = 0
-    for i = 1, #salt do
-        saltValue = saltValue + salt:byte(i)
-    end
-
-    local encrypted = ""
-    for i = 1, #plaintext do
-        local plainChar = plaintext:sub(i, i)
-        local keyChar = key:sub((i - 1) % #key + 1, (i - 1) % #key + 1)
-        local plainByte = plainChar:byte()
-        local keyByte = keyChar:byte()
-        local xorResult = bit32.bxor(plainByte, bit32.bxor(keyByte, saltValue + i))
-        encrypted = encrypted .. chars:sub((xorResult % 36) + 1, (xorResult % 36) + 1)
-    end
-
-    return encrypted .. salt
-end
-
-local function decryptCode(encrypted)
-    local key = "KSSH_SECURE_2025"
-    local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
-    if #encrypted < 5 then return nil end
-    local salt = encrypted:sub(-4)
-    local encryptedData = encrypted:sub(1, -5)
-
-    local saltValue = 0
-    for i = 1, #salt do
-        saltValue = saltValue + salt:byte(i)
-    end
-
-    local plaintext = ""
-    for i = 1, #encryptedData do
-        local encChar = encryptedData:sub(i, i)
-        local keyChar = key:sub((i - 1) % #key + 1, (i - 1) % #key + 1)
-        local pos = chars:find(encChar, 1, true)
-        if not pos then return nil end
-        local xorResult = pos - 1
-        local keyByte = keyChar:byte()
-        local plainByte = bit32.bxor(xorResult, bit32.bxor(keyByte, saltValue + i))
-        plaintext = plaintext .. string.char(plainByte % 256)
-    end
-
-    return plaintext
-end
-
 function NetPage:new(context)
     local o = setmetatable({}, self)
     o.context = context
@@ -71,15 +20,18 @@ function NetPage:new(context)
 
     o.computerId = os.getComputerID()
     o.connections = {}
-    o.mode = "list" -- list, generate, enter_name, enter_code, awaiting, verify_pin, requests
+    o.mode = "list" -- list, generate, enter_name, enter_code, awaiting, verify_pin, requests, details
     o.connectionName = ""
     o.enteredCode = ""
-    o.currentCode = nil
+    o.currentCode = nil -- Current pairing code {code, pin, expiresAt}
     o.codeTimer = nil
-    o.sessionCodes = {} -- List of generated codes
     o.pendingRequests = {} -- List of incoming pairing requests
     o.pairingPin = nil -- 4-digit verification PIN for computer entering code
     o.selectedIndex = 1
+    o.errorMessage = nil -- Error message to display
+    o.errorTimer = nil -- Timer to clear error message
+    o.selectedConnection = nil -- Connection being viewed in details mode
+    o.pingTimer = nil -- Timer for periodic pings
 
     o.width, o.height = term.getSize()
     o.backLink = {}
@@ -87,6 +39,8 @@ function NetPage:new(context)
     o.enterButton = {}
     o.requestsButton = {}
     o.requestButtons = {}
+    o.cancelButton = {}
+    o.confirmButton = {}
 
     return o
 end
@@ -94,6 +48,8 @@ end
 function NetPage:onEnter()
     self:loadConnections()
     self:startListener()
+    self:startPingService()
+    self:broadcastAlive()
     self:render()
 end
 
@@ -104,6 +60,14 @@ function NetPage:onLeave()
     if self.codeTimer then
         os.cancelTimer(self.codeTimer)
         self.codeTimer = nil
+    end
+    if self.errorTimer then
+        os.cancelTimer(self.errorTimer)
+        self.errorTimer = nil
+    end
+    if self.pingTimer then
+        os.cancelTimer(self.pingTimer)
+        self.pingTimer = nil
     end
 end
 
@@ -139,34 +103,28 @@ function NetPage:startListener()
 
             if senderId and type(message) == "table" then
                 if message.type == "pair_request" then
-                    -- Validate plaintext code against session codes
-                    local validCode = nil
-                    for _, codeEntry in ipairs(self.sessionCodes) do
-                        if codeEntry.pin == message.plaintext_code then
-                            validCode = codeEntry
-                            break
-                        end
-                    end
-
-                    if validCode then
-                        -- Generate 4-digit pairing PIN
-                        local pairingPin = string.format("%04d", math.random(1000, 9999))
+                    -- Validate PIN against current code
+                    if self.currentCode and message.pin == self.currentCode.pin then
+                        -- Valid PIN - generate verification PIN
+                        local verifyPin = string.format("%04d", math.random(1000, 9999))
 
                         -- Store pending request
                         table.insert(self.pendingRequests, {
                             id = senderId,
                             name = message.name,
-                            pin = pairingPin,
+                            pin = verifyPin,
                             timestamp = os.epoch("utc")
                         })
 
-                        -- Send pairing PIN back
+                        -- Send verification PIN back
                         rednet.send(senderId, {
                             type = "pair_ack",
-                            pin = pairingPin
+                            pin = verifyPin
                         }, "storage_pair")
 
-                        self.logger:info("NetPage", "Pairing request from #" .. senderId .. ", PIN: " .. pairingPin)
+                        self.logger:info("NetPage", "Valid pair request from #" .. senderId .. " (" .. message.name .. "), verification PIN: " .. verifyPin)
+                    else
+                        self.logger:info("NetPage", "Invalid pair request from #" .. senderId .. " - PIN mismatch")
                     end
 
                 elseif message.type == "pair_ack" then
@@ -179,6 +137,34 @@ function NetPage:startListener()
                     self:addConnection(senderId, message.name)
                     self.mode = "list"
                     self.logger:info("NetPage", "Pairing accepted by #" .. senderId)
+
+                elseif message.type == "ping" then
+                    -- Respond to ping
+                    rednet.send(senderId, {
+                        type = "pong",
+                        timestamp = message.timestamp
+                    }, "storage_pair")
+                    self:trackPacket(senderId, "received", 50)
+
+                elseif message.type == "pong" then
+                    -- Calculate ping time
+                    local pingTime = os.epoch("utc") - message.timestamp
+                    self:updatePing(senderId, pingTime)
+                    self:trackPacket(senderId, "received", 50)
+
+                elseif message.type == "alive" then
+                    -- Received alive broadcast - mark as online and respond
+                    self:markConnectionOnline(senderId)
+                    rednet.send(senderId, {
+                        type = "alive_response",
+                        name = "Computer " .. self.computerId
+                    }, "storage_pair")
+                    self:trackPacket(senderId, "received", 50)
+
+                elseif message.type == "alive_response" then
+                    -- Received alive response - mark as online
+                    self:markConnectionOnline(senderId)
+                    self:trackPacket(senderId, "received", 50)
                 end
             end
         end
@@ -186,46 +172,32 @@ function NetPage:startListener()
 end
 
 function NetPage:generateCode()
+    -- Generate 4-digit random PIN
+    local pin = string.format("%04d", math.random(1000, 9999))
+
+    -- Create code: COMPUTERID_PIN
+    local code = self.computerId .. "_" .. pin
+
     local epoch = os.epoch("utc")
-    local pin = string.format("%04d", (epoch % 10000))
-    local plaintext = self.computerId .. "_" .. pin
 
-    -- Generate salt
-    local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    local salt = ""
-    for i = 1, 4 do
-        local idx = (epoch + i * 7) % 36 + 1
-        salt = salt .. chars:sub(idx, idx)
-    end
-
-    local encrypted = encryptCode(plaintext, salt)
-
-    -- Save to session codes
-    table.insert(self.sessionCodes, {
-        pin = pin,
-        plaintext = plaintext,
-        encrypted = encrypted,
-        generated = epoch
-    })
-
-    self.logger:info("NetPage", "Generated code, PIN: " .. pin)
+    self.logger:info("NetPage", "Generated code: " .. code)
 
     return {
-        encrypted = encrypted,
+        code = code,
         pin = pin,
         generated = epoch,
-        expiresAt = epoch + 60000
+        expiresAt = epoch + 30000  -- 30 seconds
     }
 end
 
-function NetPage:sendPairRequest(targetId, plaintextCode, myName)
+function NetPage:sendPairRequest(targetId, pin, myName)
     rednet.send(targetId, {
         type = "pair_request",
-        plaintext_code = plaintextCode,
+        pin = pin,
         name = myName
     }, "storage_pair")
 
-    self.logger:info("NetPage", "Sent pair request to #" .. targetId)
+    self.logger:info("NetPage", "Sent pair request to #" .. targetId .. " with PIN: " .. pin)
 end
 
 function NetPage:acceptPairing(request)
@@ -256,11 +228,28 @@ function NetPage:addConnection(id, name)
         end
     end
 
+    local now = os.epoch("utc")
     table.insert(self.connections, {
         id = id,
         name = name,
-        addedAt = os.epoch("utc"),
-        systemType = "storage"
+        addedAt = now,
+        systemType = "storage",
+        metrics = {
+            packetsSent = 0,
+            packetsReceived = 0,
+            bytesSent = 0,
+            bytesReceived = 0,
+            lastPing = nil,
+            avgPing = 0,
+            pingCount = 0,
+            totalPing = 0,
+            connectedAt = now,
+            lastActive = now
+        },
+        presence = {
+            online = false,  -- Start as offline until first response
+            lastSeen = now
+        }
     })
 
     self:saveConnections()
@@ -296,6 +285,8 @@ function NetPage:render()
         self:drawVerifyPinMode()
     elseif self.mode == "requests" then
         self:drawRequestsMode()
+    elseif self.mode == "details" then
+        self:drawConnectionDetails()
     end
 
     self:drawFooter()
@@ -313,10 +304,11 @@ function NetPage:drawHeader()
     term.setTextColor(colors.yellow)
     term.write("ID: " .. self.computerId)
 
-    term.setCursorPos(self.width - 5, 1)
-    term.setTextColor(colors.lightBlue)
-    term.write("[ESC]")
-    self.backLink = {y = 1, x1 = self.width - 5, x2 = self.width}
+    term.setCursorPos(self.width - 6, 1)
+    term.setBackgroundColor(colors.red)
+    term.setTextColor(colors.white)
+    term.write(" BACK ")
+    self.backLink = {y = 1, x1 = self.width - 6, x2 = self.width}
 end
 
 function NetPage:drawConnectionsList()
@@ -326,21 +318,33 @@ function NetPage:drawConnectionsList()
     term.setCursorPos(2, y)
     term.setBackgroundColor(colors.green)
     term.setTextColor(colors.white)
-    term.write(" [A] Add Connection ")
-    self.addButton = {y = y, x1 = 2, x2 = 22}
+    term.write(" + ADD CONNECTION ")
+    self.addButton = {y = y, x1 = 2, x2 = 19}
 
-    term.setCursorPos(25, y)
+    term.setCursorPos(21, y)
     term.setBackgroundColor(colors.blue)
-    term.write(" [E] Enter Code ")
-    self.enterButton = {y = y, x1 = 25, x2 = 41}
+    term.write(" ENTER CODE ")
+    self.enterButton = {y = y, x1 = 21, x2 = 33}
+
+    -- Requests button - ALWAYS visible
+    term.setCursorPos(35, y)
+    if #self.pendingRequests > 0 then
+        term.setBackgroundColor(colors.orange)
+        term.setTextColor(colors.white)
+    else
+        term.setBackgroundColor(colors.gray)
+        term.setTextColor(colors.lightGray)
+    end
+    term.write(string.format(" REQUESTS [%d] ", #self.pendingRequests))
+    self.requestsButton = {y = y, x1 = 35, x2 = 51}
 
     y = y + 2
 
     -- Connections
     term.setCursorPos(2, y)
     term.setBackgroundColor(colors.black)
-    term.setTextColor(colors.lightGray)
-    term.write("PAIRED COMPUTERS:")
+    term.setTextColor(colors.cyan)
+    term.write("== PAIRED COMPUTERS ==")
     y = y + 1
 
     if #self.connections == 0 then
@@ -348,34 +352,80 @@ function NetPage:drawConnectionsList()
         term.setTextColor(colors.gray)
         term.write("No connections")
     else
+        self.connectionRegions = {}
         for i, conn in ipairs(self.connections) do
             term.setCursorPos(2, y)
             term.setBackgroundColor(colors.gray)
+
+            -- Determine online status color
+            local isOnline = conn.presence and conn.presence.online
+            local nameColor = isOnline and colors.lime or colors.red
+
+            -- Format ping display
+            local pingDisplay = "---"
+            if conn.metrics and conn.metrics.lastPing then
+                pingDisplay = string.format("%dms", conn.metrics.lastPing)
+            end
+
+            -- Write ID
             term.setTextColor(colors.white)
-            local line = string.format(" #%-3d  %-20s ", conn.id, conn.name:sub(1, 20))
-            term.write(line)
+            term.write(string.format(" #%-3d  ", conn.id))
+
+            -- Write name with status color
+            term.setTextColor(nameColor)
+            term.write(string.format("%-15s", conn.name:sub(1, 15)))
+
+            -- Write ping
+            term.setTextColor(colors.cyan)
+            term.write(string.format("  %5s ", pingDisplay))
+
+            -- Store clickable region for connection (calculate total width)
+            local lineWidth = 29 -- " #123  Name12345678901  123ms "
+            table.insert(self.connectionRegions, {
+                y = y,
+                x1 = 2,
+                x2 = 2 + lineWidth,
+                connection = conn
+            })
 
             term.setBackgroundColor(colors.red)
+            term.setTextColor(colors.white)
             term.write(" X ")
 
             y = y + 1
             term.setBackgroundColor(colors.black)
             if y >= self.height - 2 then break end
         end
-    end
 
-    -- Requests button
-    if #self.pendingRequests > 0 then
-        term.setCursorPos(2, self.height - 2)
-        term.setBackgroundColor(colors.yellow)
-        term.setTextColor(colors.black)
-        term.write(string.format(" Requests [%d] ", #self.pendingRequests))
-        self.requestsButton = {y = self.height - 2, x1 = 2, x2 = 20}
+        -- Instructions
+        term.setCursorPos(2, y)
+        term.setTextColor(colors.gray)
+        term.write("(Click connection to view details)")
     end
 end
 
 function NetPage:drawGenerateMode()
     local centerY = math.floor(self.height / 2)
+    local y = 3
+
+    -- Top buttons
+    term.setCursorPos(2, y)
+    term.setBackgroundColor(colors.red)
+    term.setTextColor(colors.white)
+    term.write(" CANCEL ")
+    self.cancelButton = {y = y, x1 = 2, x2 = 10}
+
+    -- Requests button - ALWAYS visible
+    term.setCursorPos(12, y)
+    if #self.pendingRequests > 0 then
+        term.setBackgroundColor(colors.orange)
+        term.setTextColor(colors.white)
+    else
+        term.setBackgroundColor(colors.gray)
+        term.setTextColor(colors.lightGray)
+    end
+    term.write(string.format(" REQUESTS [%d] ", #self.pendingRequests))
+    self.requestsButton = {y = y, x1 = 12, x2 = 28}
 
     term.setCursorPos(2, centerY - 5)
     term.setBackgroundColor(colors.black)
@@ -383,7 +433,7 @@ function NetPage:drawGenerateMode()
     term.write("PAIRING CODE FOR: " .. self.connectionName)
 
     if self.currentCode then
-        -- Show encrypted code
+        -- Show pairing code
         term.setCursorPos(2, centerY - 3)
         term.setTextColor(colors.lightGray)
         term.write("Share this code:")
@@ -391,40 +441,52 @@ function NetPage:drawGenerateMode()
         term.setCursorPos(2, centerY - 2)
         term.setBackgroundColor(colors.gray)
         term.setTextColor(colors.yellow)
-        term.write(" " .. self.currentCode.encrypted .. " ")
+        local codeDisplay = " " .. self.currentCode.code .. " "
+        term.write(codeDisplay)
 
         -- Countdown bar
         local timeLeft = math.max(0, (self.currentCode.expiresAt - os.epoch("utc")) / 1000)
         local barWidth = self.width - 4
-        local fillWidth = math.floor((timeLeft / 60) * barWidth)
+        local fillWidth = math.floor((timeLeft / 30) * barWidth)
 
         term.setCursorPos(2, centerY)
-        term.setBackgroundColor(colors.black)
 
-        -- Draw bar
-        for x = 0, barWidth - 1 do
-            if x < fillWidth then
-                if fillWidth > barWidth * 0.5 then
-                    term.setBackgroundColor(colors.lime)
-                elseif fillWidth > barWidth * 0.25 then
-                    term.setBackgroundColor(colors.yellow)
-                else
-                    term.setBackgroundColor(colors.red)
-                end
-            else
-                term.setBackgroundColor(colors.gray)
-            end
+        -- Determine bar color
+        local barColor
+        if timeLeft > 30 then
+            barColor = colors.lime
+        else
+            barColor = colors.red
+        end
+
+        -- Draw filled portion
+        for x = 1, fillWidth do
+            term.setBackgroundColor(barColor)
             term.write(" ")
         end
 
-        -- Time text in center of bar
+        -- Draw empty portion
+        for x = fillWidth + 1, barWidth do
+            term.setBackgroundColor(colors.gray)
+            term.write(" ")
+        end
+
+        -- Time text in center of bar with matching background
         local timeText = string.format("%ds", math.floor(timeLeft))
         local textX = math.floor((self.width - #timeText) / 2)
         term.setCursorPos(textX, centerY)
 
-        if fillWidth > barWidth * 0.5 then
-            term.setTextColor(colors.black)
+        -- Set background color to match the bar at this position
+        local textPosition = textX - 2  -- Offset for bar start position
+        if textPosition <= fillWidth then
+            term.setBackgroundColor(barColor)
+            if barColor == colors.lime then
+                term.setTextColor(colors.black)
+            else
+                term.setTextColor(colors.white)
+            end
         else
+            term.setBackgroundColor(colors.gray)
             term.setTextColor(colors.white)
         end
         term.write(timeText)
@@ -433,151 +495,239 @@ function NetPage:drawGenerateMode()
         term.setCursorPos(2, centerY + 2)
         term.setBackgroundColor(colors.black)
         term.setTextColor(colors.lightGray)
-        term.write("Code regenerates every 60 seconds")
-    end
-
-    -- Requests button
-    if #self.pendingRequests > 0 then
-        term.setCursorPos(2, self.height - 2)
-        term.setBackgroundColor(colors.yellow)
-        term.setTextColor(colors.black)
-        term.write(string.format(" [R] Requests [%d] ", #self.pendingRequests))
-        self.requestsButton = {y = self.height - 2, x1 = 2, x2 = 25}
+        term.write("Code regenerates every 30 seconds")
     end
 end
 
 function NetPage:drawEnterNameMode()
     local centerY = math.floor(self.height / 2)
+    local y = 3
 
-    term.setCursorPos(2, centerY - 2)
-    term.setBackgroundColor(colors.black)
+    -- Top buttons
+    term.setCursorPos(2, y)
+    term.setBackgroundColor(colors.red)
     term.setTextColor(colors.white)
-    term.write("ADD CONNECTION")
+    term.write(" CANCEL ")
+    self.cancelButton = {y = y, x1 = 2, x2 = 10}
 
-    term.setCursorPos(2, centerY)
+    term.setCursorPos(2, centerY - 3)
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.cyan)
+    term.write("== ADD NEW CONNECTION ==")
+
+    term.setCursorPos(2, centerY - 1)
     term.setTextColor(colors.lightGray)
-    term.write("Connection name:")
+    term.write("Enter a name for this connection:")
 
     term.setCursorPos(2, centerY + 1)
     term.setBackgroundColor(colors.gray)
     term.clearLine()
     term.setTextColor(colors.white)
-    term.write(" " .. self.connectionName .. "_")
+    local inputWidth = self.width - 4
+    term.write(string.rep(" ", inputWidth))
+    term.setCursorPos(3, centerY + 1)
+    term.write(self.connectionName .. "_")
 
+    -- Confirm button
     term.setCursorPos(2, centerY + 3)
+    if self.connectionName ~= "" then
+        term.setBackgroundColor(colors.green)
+        term.setTextColor(colors.white)
+    else
+        term.setBackgroundColor(colors.gray)
+        term.setTextColor(colors.lightGray)
+    end
+    term.write(" CONFIRM ")
+    self.confirmButton = {y = centerY + 3, x1 = 2, x2 = 12}
+
+    term.setCursorPos(14, centerY + 3)
     term.setBackgroundColor(colors.black)
-    term.setTextColor(colors.yellow)
-    term.write("Press ENTER to generate code")
+    term.setTextColor(colors.gray)
+    term.write("or press ENTER")
 end
 
 function NetPage:drawEnterCodeMode()
     local centerY = math.floor(self.height / 2)
+    local y = 3
 
-    term.setCursorPos(2, centerY - 2)
-    term.setBackgroundColor(colors.black)
+    -- Top buttons
+    term.setCursorPos(2, y)
+    term.setBackgroundColor(colors.red)
     term.setTextColor(colors.white)
-    term.write("ENTER PAIRING CODE")
+    term.write(" CANCEL ")
+    self.cancelButton = {y = y, x1 = 2, x2 = 10}
 
-    term.setCursorPos(2, centerY)
+    term.setCursorPos(2, centerY - 3)
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.cyan)
+    term.write("== ENTER PAIRING CODE ==")
+
+    term.setCursorPos(2, centerY - 1)
     term.setTextColor(colors.lightGray)
-    term.write("Pairing code:")
+    term.write("Paste or type the pairing code:")
 
     term.setCursorPos(2, centerY + 1)
     term.setBackgroundColor(colors.gray)
     term.clearLine()
     term.setTextColor(colors.white)
-    term.write(" " .. self.enteredCode .. "_")
+    local inputWidth = self.width - 4
+    term.write(string.rep(" ", inputWidth))
+    term.setCursorPos(3, centerY + 1)
+    term.write(self.enteredCode .. "_")
 
-    term.setCursorPos(2, centerY + 3)
+    -- Error message
+    if self.errorMessage then
+        term.setCursorPos(2, centerY + 2)
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.red)
+        term.write("ERROR: " .. self.errorMessage)
+    end
+
+    -- Confirm button
+    local btnY = centerY + 4
+    term.setCursorPos(2, btnY)
+    if self.enteredCode ~= "" then
+        term.setBackgroundColor(colors.green)
+        term.setTextColor(colors.white)
+    else
+        term.setBackgroundColor(colors.gray)
+        term.setTextColor(colors.lightGray)
+    end
+    term.write(" CONNECT ")
+    self.confirmButton = {y = btnY, x1 = 2, x2 = 12}
+
+    term.setCursorPos(14, btnY)
     term.setBackgroundColor(colors.black)
-    term.setTextColor(colors.yellow)
-    term.write("Press ENTER to connect")
+    term.setTextColor(colors.gray)
+    term.write("or press ENTER")
 end
 
 function NetPage:drawAwaitingMode()
     local centerY = math.floor(self.height / 2)
+    local y = 3
 
-    term.setCursorPos(2, centerY - 1)
+    -- Top buttons
+    term.setCursorPos(2, y)
+    term.setBackgroundColor(colors.red)
+    term.setTextColor(colors.white)
+    term.write(" CANCEL ")
+    self.cancelButton = {y = y, x1 = 2, x2 = 10}
+
+    term.setCursorPos(2, centerY - 2)
     term.setBackgroundColor(colors.black)
-    term.setTextColor(colors.cyan)
-    term.write("AWAITING CONNECTION...")
+    term.setTextColor(colors.lime)
+    term.write("== CONNECTING ==")
 
     -- Animated loading
-    local dots = string.rep(".", (os.epoch("utc") / 500) % 4)
-    term.setCursorPos(2, centerY + 1)
+    local dots = string.rep(".", ((os.epoch("utc") / 500) % 4) + 1)
+    term.setCursorPos(2, centerY)
+    term.setTextColor(colors.cyan)
+    term.write("Waiting for response" .. dots .. string.rep(" ", 4 - #dots))
+
+    term.setCursorPos(2, centerY + 2)
     term.setTextColor(colors.lightGray)
-    term.write("Waiting for pairing response" .. dots)
+    term.write("This may take a few seconds...")
 end
 
 function NetPage:drawVerifyPinMode()
     local centerY = math.floor(self.height / 2)
+    local y = 3
 
-    term.setCursorPos(2, centerY - 3)
+    -- Top buttons
+    term.setCursorPos(2, y)
+    term.setBackgroundColor(colors.red)
+    term.setTextColor(colors.white)
+    term.write(" CANCEL ")
+    self.cancelButton = {y = y, x1 = 2, x2 = 10}
+
+    term.setCursorPos(2, centerY - 4)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.lime)
-    term.write("PAIRING PIN RECEIVED")
+    term.write("== PAIRING PIN RECEIVED ==")
 
-    term.setCursorPos(2, centerY - 1)
+    term.setCursorPos(2, centerY - 2)
     term.setTextColor(colors.white)
-    term.write("Tell the other person this PIN:")
+    term.write("Tell the other computer this PIN:")
 
-    term.setCursorPos(2, centerY + 1)
-    term.setBackgroundColor(colors.gray)
-    term.setTextColor(colors.yellow)
-    term.write(string.rep(" ", 20))
-    term.setCursorPos(math.floor((self.width - 4) / 2), centerY + 1)
-    term.write(" " .. self.pairingPin .. " ")
+    -- Draw PIN box
+    term.setCursorPos(2, centerY)
+    term.setBackgroundColor(colors.orange)
+    term.setTextColor(colors.white)
+    local pinBox = "  PIN: " .. self.pairingPin .. "  "
+    local pinX = math.floor((self.width - #pinBox) / 2)
+    term.setCursorPos(pinX, centerY)
+    term.write(pinBox)
 
-    term.setCursorPos(2, centerY + 3)
+    term.setCursorPos(2, centerY + 2)
     term.setBackgroundColor(colors.black)
-    term.setTextColor(colors.lightGray)
+    term.setTextColor(colors.cyan)
     term.write("Waiting for them to accept...")
+
+    -- Animated dots
+    local dots = string.rep(".", ((os.epoch("utc") / 500) % 4) + 1)
+    term.write(dots .. string.rep(" ", 4 - #dots))
 end
 
 function NetPage:drawRequestsMode()
     local y = 3
 
+    -- Top buttons
     term.setCursorPos(2, y)
-    term.setBackgroundColor(colors.black)
+    term.setBackgroundColor(colors.red)
     term.setTextColor(colors.white)
-    term.write("PAIRING REQUESTS")
+    term.write(" <- BACK ")
+    self.cancelButton = {y = y, x1 = 2, x2 = 11}
+
+    term.setCursorPos(14, y)
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.cyan)
+    term.write("== PAIRING REQUESTS ==")
 
     y = y + 2
 
     self.requestButtons = {}
 
-    for i, request in ipairs(self.pendingRequests) do
-        term.setCursorPos(2, y)
-        term.setBackgroundColor(colors.gray)
-        term.setTextColor(colors.white)
-
-        local line = string.format(" #%-3d  %-15s  PIN: %s ",
-            request.id,
-            request.name:sub(1, 15),
-            request.pin
-        )
-        term.write(line)
-
-        term.setBackgroundColor(colors.green)
-        term.write(" PAIR ")
-
-        table.insert(self.requestButtons, {
-            y = y,
-            x1 = self.width - 8,
-            x2 = self.width - 2,
-            request = request
-        })
-
-        y = y + 1
-        term.setBackgroundColor(colors.black)
-
-        if y >= self.height - 2 then break end
-    end
-
     if #self.pendingRequests == 0 then
         term.setCursorPos(2, y)
+        term.setBackgroundColor(colors.black)
         term.setTextColor(colors.gray)
         term.write("No pending requests")
+
+        term.setCursorPos(2, y + 2)
+        term.setTextColor(colors.lightGray)
+        term.write("When someone enters your pairing code,")
+        term.setCursorPos(2, y + 3)
+        term.write("their request will appear here.")
+    else
+        for i, request in ipairs(self.pendingRequests) do
+            term.setCursorPos(2, y)
+            term.setBackgroundColor(colors.gray)
+            term.setTextColor(colors.white)
+
+            local line = string.format(" #%-3d  %-15s  PIN: %s ",
+                request.id,
+                request.name:sub(1, 15),
+                request.pin
+            )
+            term.write(line)
+
+            term.setBackgroundColor(colors.lime)
+            term.setTextColor(colors.black)
+            term.write(" ACCEPT ")
+
+            local acceptBtnEnd = #line + 9
+            table.insert(self.requestButtons, {
+                y = y,
+                x1 = #line + 2,
+                x2 = acceptBtnEnd,
+                request = request
+            })
+
+            y = y + 1
+            term.setBackgroundColor(colors.black)
+
+            if y >= self.height - 2 then break end
+        end
     end
 end
 
@@ -589,17 +739,21 @@ function NetPage:drawFooter()
     term.setCursorPos(2, self.height)
 
     if self.mode == "list" then
-        term.write("A=Add | E=Enter Code | ESC=Back")
+        term.write("Click buttons to manage connections | Check REQUESTS for incoming pairs")
     elseif self.mode == "generate" then
-        term.write("R=Requests | ESC=Cancel")
+        term.write("Share the code with the other computer | Check REQUESTS for responses")
     elseif self.mode == "enter_name" then
-        term.write("Type name, ENTER to continue | ESC=Cancel")
+        term.write("Type a name and click CONFIRM or press ENTER")
     elseif self.mode == "enter_code" then
-        term.write("Type code, ENTER to connect | ESC=Cancel")
+        term.write("Type the pairing code and click CONNECT or press ENTER")
+    elseif self.mode == "awaiting" then
+        term.write("Waiting for the other computer to respond...")
+    elseif self.mode == "verify_pin" then
+        term.write("Tell the other computer the PIN shown above")
     elseif self.mode == "requests" then
-        term.write("Click PAIR to accept | ESC=Back")
-    else
-        term.write("ESC=Cancel")
+        term.write("Click ACCEPT to pair with a computer")
+    elseif self.mode == "details" then
+        term.write("Connection metrics | Pings every 5 seconds")
     end
 end
 
@@ -624,16 +778,7 @@ function NetPage:handleInput(event, param1, param2, param3)
             end
 
         elseif self.mode == "list" then
-            if key == keys.a then
-                self.mode = "enter_name"
-                self.connectionName = ""
-                self:render()
-            elseif key == keys.e then
-                self.mode = "enter_name"
-                self.connectionName = ""
-                self.enteredCode = ""
-                self:render()
-            end
+            -- No keyboard shortcuts - use buttons only
 
         elseif self.mode == "enter_name" then
             if key == keys.enter and self.connectionName ~= "" then
@@ -657,38 +802,18 @@ function NetPage:handleInput(event, param1, param2, param3)
 
         elseif self.mode == "enter_code" then
             if key == keys.enter and self.enteredCode ~= "" then
-                -- Decrypt and send request
-                local decrypted = decryptCode(self.enteredCode)
-                if decrypted then
-                    local parts = {}
-                    for part in decrypted:gmatch("[^_]+") do
-                        table.insert(parts, part)
-                    end
-
-                    if #parts == 2 then
-                        local targetId = tonumber(parts[1])
-                        local plaintextCode = parts[2]
-
-                        if targetId then
-                            self:sendPairRequest(targetId, plaintextCode, self.connectionName)
-                            self.mode = "awaiting"
-                            self:render()
-                        end
-                    end
-                end
+                self:attemptConnect()
             elseif key == keys.backspace then
                 self.enteredCode = self.enteredCode:sub(1, -2)
+                self:clearError()
                 self:render()
             end
 
         elseif self.mode == "generate" then
-            if key == keys.r and #self.pendingRequests > 0 then
-                self.mode = "requests"
-                self:render()
-            end
+            -- No keyboard shortcuts - use buttons only
 
         elseif self.mode == "requests" then
-            -- Handled by mouse
+            -- Handled by mouse only
         end
 
     elseif event == "char" then
@@ -697,22 +822,30 @@ function NetPage:handleInput(event, param1, param2, param3)
             self:render()
         elseif self.mode == "enter_code" then
             self.enteredCode = (self.enteredCode .. param1):upper()
+            self:clearError()
             self:render()
         end
 
     elseif event == "mouse_click" then
         self:handleClick(param2, param3)
 
-    elseif event == "timer" and param1 == self.codeTimer then
-        if self.mode == "generate" then
-            -- Check if code expired
-            if self.currentCode and os.epoch("utc") >= self.currentCode.expiresAt then
-                -- Generate new code
-                self.currentCode = self:generateCode()
-            end
+    elseif event == "timer" then
+        if param1 == self.codeTimer then
+            if self.mode == "generate" then
+                -- Check if code expired
+                if self.currentCode and os.epoch("utc") >= self.currentCode.expiresAt then
+                    -- Generate new code
+                    self.currentCode = self:generateCode()
+                end
 
-            -- Restart timer
-            self.codeTimer = os.startTimer(1)
+                -- Restart timer
+                self.codeTimer = os.startTimer(1)
+                self:render()
+            end
+        elseif param1 == self.errorTimer then
+            -- Clear error message
+            self.errorMessage = nil
+            self.errorTimer = nil
             self:render()
         end
     end
@@ -728,9 +861,31 @@ function NetPage:handleInput(event, param1, param2, param3)
 end
 
 function NetPage:handleClick(x, y)
+    -- Back button in header
     if y == self.backLink.y and x >= self.backLink.x1 and x <= self.backLink.x2 then
         if self.context.router then
             self.context.router:navigate("console")
+        end
+        return
+    end
+
+    -- Cancel/Back buttons (used in most modes)
+    if self.cancelButton and self.cancelButton.y == y and x >= self.cancelButton.x1 and x <= self.cancelButton.x2 then
+        if self.mode == "list" then
+            if self.context.router then
+                self.context.router:navigate("console")
+            end
+        else
+            -- Cancel current action and go back to list
+            self.mode = "list"
+            self.connectionName = ""
+            self.enteredCode = ""
+            self.pairingPin = nil
+            if self.codeTimer then
+                os.cancelTimer(self.codeTimer)
+                self.codeTimer = nil
+            end
+            self:render()
         end
         return
     end
@@ -741,6 +896,7 @@ function NetPage:handleClick(x, y)
             self.connectionName = ""
             self.enteredCode = ""
             self:render()
+            return
         end
 
         if self.enterButton.y == y and x >= self.enterButton.x1 and x <= self.enterButton.x2 then
@@ -748,11 +904,31 @@ function NetPage:handleClick(x, y)
             self.connectionName = ""
             self.enteredCode = " "  -- Mark as entering code
             self:render()
+            return
         end
 
-        if self.requestsButton.y == y and x >= self.requestsButton.x1 and x <= self.requestsButton.x2 then
+        if self.requestsButton and self.requestsButton.y == y and x >= self.requestsButton.x1 and x <= self.requestsButton.x2 then
             self.mode = "requests"
             self:render()
+            return
+        end
+
+        -- Check connection clicks
+        if self.connectionRegions then
+            for _, region in ipairs(self.connectionRegions) do
+                if y == region.y and x >= region.x1 and x <= region.x2 then
+                    -- Check if click is on delete button (last 3 chars)
+                    if x >= region.x2 + 1 and x <= region.x2 + 3 then
+                        -- Delete button clicked - handled by existing code below
+                    else
+                        -- Connection row clicked - show details
+                        self.selectedConnection = region.connection
+                        self.mode = "details"
+                        self:render()
+                        return
+                    end
+                end
+            end
         end
 
     elseif self.mode == "generate" then
@@ -770,12 +946,451 @@ function NetPage:handleClick(x, y)
                 return
             end
         end
+
+    elseif self.mode == "enter_name" then
+        -- Confirm button
+        if self.confirmButton and self.confirmButton.y == y and x >= self.confirmButton.x1 and x <= self.confirmButton.x2 then
+            if self.connectionName ~= "" then
+                if self.enteredCode == "" then
+                    -- Adding connection - go to generate
+                    self.mode = "generate"
+                    self.currentCode = self:generateCode()
+
+                    -- Start timer for regeneration
+                    self.codeTimer = os.startTimer(1)
+                    self:render()
+                else
+                    -- Entering code - go to enter_code
+                    self.mode = "enter_code"
+                    self:render()
+                end
+            end
+        end
+
+    elseif self.mode == "enter_code" then
+        -- Connect button
+        if self.confirmButton and self.confirmButton.y == y and x >= self.confirmButton.x1 and x <= self.confirmButton.x2 then
+            if self.enteredCode ~= "" then
+                self:attemptConnect()
+            end
+        end
     end
+end
+
+-- Show error message with auto-clear
+function NetPage:showError(message)
+    self.errorMessage = message
+    if self.errorTimer then
+        os.cancelTimer(self.errorTimer)
+    end
+    self.errorTimer = os.startTimer(5) -- Clear after 5 seconds
+    self:render()
+end
+
+function NetPage:clearError()
+    self.errorMessage = nil
+    if self.errorTimer then
+        os.cancelTimer(self.errorTimer)
+        self.errorTimer = nil
+    end
+end
+
+function NetPage:attemptConnect()
+    -- Trim whitespace and convert to uppercase
+    self.enteredCode = self.enteredCode:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", ""):upper()
+
+    if self.enteredCode == "" then
+        self:showError("Please enter a pairing code")
+        return
+    end
+
+    -- Clear any previous error
+    self:clearError()
+
+    self.logger:info("NetPage", "Attempting to connect with code: " .. self.enteredCode)
+
+    -- Parse code: COMPUTERID_PIN
+    local parts = {}
+    for part in self.enteredCode:gmatch("[^_]+") do
+        table.insert(parts, part)
+    end
+
+    if #parts ~= 2 then
+        self:showError("Invalid code format (expected: COMPUTERID_PIN)")
+        self.logger:info("NetPage", "Parse failed, got " .. #parts .. " parts instead of 2")
+        return
+    end
+
+    local targetId = tonumber(parts[1])
+    local pin = parts[2]
+
+    if not targetId then
+        self:showError("Invalid computer ID in code")
+        self.logger:info("NetPage", "Failed to parse ID from: " .. parts[1])
+        return
+    end
+
+    -- Validate PIN is 4 digits
+    if #pin ~= 4 or not pin:match("^%d+$") then
+        self:showError("Invalid PIN (must be 4 digits)")
+        self.logger:info("NetPage", "Invalid PIN: " .. pin)
+        return
+    end
+
+    self.logger:info("NetPage", "Sending pair request to #" .. targetId .. " with PIN: " .. pin)
+
+    -- Success - send pairing request
+    self:sendPairRequest(targetId, pin, self.connectionName)
+    self.mode = "awaiting"
+    self:render()
+end
+
+function NetPage:drawConnectionDetails()
+    if not self.selectedConnection then
+        self.mode = "list"
+        self:render()
+        return
+    end
+
+    local conn = self.selectedConnection
+    local y = 3
+
+    -- Back button
+    term.setCursorPos(2, y)
+    term.setBackgroundColor(colors.red)
+    term.setTextColor(colors.white)
+    term.write(" <- BACK ")
+    self.cancelButton = {y = y, x1 = 2, x2 = 11}
+
+    y = y + 2
+
+    -- Connection name header
+    term.setCursorPos(2, y)
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.cyan)
+    term.write("== CONNECTION DETAILS ==")
+    y = y + 2
+
+    -- Connection info
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Name:")
+    term.setCursorPos(20, y)
+    term.setTextColor(colors.white)
+    term.write(conn.name)
+    y = y + 1
+
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Computer ID:")
+    term.setCursorPos(20, y)
+    term.setTextColor(colors.yellow)
+    term.write("#" .. conn.id)
+    y = y + 1
+
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Status:")
+    term.setCursorPos(20, y)
+    local isOnline = conn.presence and conn.presence.online
+    if isOnline then
+        term.setTextColor(colors.lime)
+        term.write("ONLINE")
+    else
+        term.setTextColor(colors.red)
+        term.write("OFFLINE")
+    end
+    y = y + 1
+
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Connected:")
+    term.setCursorPos(20, y)
+    term.setTextColor(colors.lime)
+    local connTime = (os.epoch("utc") - conn.metrics.connectedAt) / 1000
+    term.write(self:formatDuration(connTime))
+    y = y + 2
+
+    -- Network metrics
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.cyan)
+    term.write("== NETWORK METRICS ==")
+    y = y + 2
+
+    local metrics = conn.metrics or {}
+
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Packets Sent:")
+    term.setCursorPos(20, y)
+    term.setTextColor(colors.orange)
+    term.write(tostring(metrics.packetsSent or 0))
+    y = y + 1
+
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Packets Received:")
+    term.setCursorPos(20, y)
+    term.setTextColor(colors.lime)
+    term.write(tostring(metrics.packetsReceived or 0))
+    y = y + 1
+
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Data Sent:")
+    term.setCursorPos(20, y)
+    term.setTextColor(colors.orange)
+    term.write(self:formatBytes(metrics.bytesSent or 0))
+    y = y + 1
+
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Data Received:")
+    term.setCursorPos(20, y)
+    term.setTextColor(colors.lime)
+    term.write(self:formatBytes(metrics.bytesReceived or 0))
+    y = y + 2
+
+    -- Ping stats
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.cyan)
+    term.write("== LATENCY ==")
+    y = y + 2
+
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Last Ping:")
+    term.setCursorPos(20, y)
+    if metrics.lastPing then
+        term.setTextColor(colors.yellow)
+        term.write(string.format("%dms", metrics.lastPing))
+    else
+        term.setTextColor(colors.gray)
+        term.write("N/A")
+    end
+    y = y + 1
+
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Avg Ping:")
+    term.setCursorPos(20, y)
+    if metrics.avgPing and metrics.avgPing > 0 then
+        term.setTextColor(colors.cyan)
+        term.write(string.format("%dms", math.floor(metrics.avgPing)))
+    else
+        term.setTextColor(colors.gray)
+        term.write("N/A")
+    end
+end
+
+function NetPage:startPingService()
+    self.context.scheduler:submit("net_ping", function()
+        while self.listenerRunning do
+            for _, conn in ipairs(self.connections) do
+                -- Send ping
+                rednet.send(conn.id, {
+                    type = "ping",
+                    timestamp = os.epoch("utc")
+                }, "storage_pair")
+
+                self:trackPacket(conn.id, "sent", 50)
+            end
+
+            -- Check connection health (mark offline if no response)
+            self:checkConnectionHealth()
+
+            os.sleep(5) -- Ping every 5 seconds
+        end
+    end)
+end
+
+function NetPage:trackPacket(computerId, direction, bytes)
+    for _, conn in ipairs(self.connections) do
+        if conn.id == computerId then
+            if not conn.metrics then
+                conn.metrics = {
+                    packetsSent = 0,
+                    packetsReceived = 0,
+                    bytesSent = 0,
+                    bytesReceived = 0,
+                    lastPing = nil,
+                    avgPing = 0,
+                    pingCount = 0,
+                    totalPing = 0,
+                    connectedAt = conn.addedAt or os.epoch("utc"),
+                    lastActive = os.epoch("utc")
+                }
+            end
+
+            conn.metrics.lastActive = os.epoch("utc")
+
+            if direction == "sent" then
+                conn.metrics.packetsSent = conn.metrics.packetsSent + 1
+                conn.metrics.bytesSent = conn.metrics.bytesSent + bytes
+            else
+                conn.metrics.packetsReceived = conn.metrics.packetsReceived + 1
+                conn.metrics.bytesReceived = conn.metrics.bytesReceived + bytes
+            end
+
+            self:saveConnections()
+            break
+        end
+    end
+end
+
+function NetPage:updatePing(computerId, pingTime)
+    for _, conn in ipairs(self.connections) do
+        if conn.id == computerId then
+            if not conn.metrics then
+                conn.metrics = {}
+            end
+
+            conn.metrics.lastPing = pingTime
+            conn.metrics.pingCount = (conn.metrics.pingCount or 0) + 1
+            conn.metrics.totalPing = (conn.metrics.totalPing or 0) + pingTime
+            conn.metrics.avgPing = conn.metrics.totalPing / conn.metrics.pingCount
+
+            -- Mark as online when receiving pong
+            if not conn.presence then
+                conn.presence = {}
+            end
+            conn.presence.online = true
+            conn.presence.lastSeen = os.epoch("utc")
+
+            self:saveConnections()
+            break
+        end
+    end
+end
+
+function NetPage:formatBytes(bytes)
+    if bytes < 1024 then
+        return string.format("%dB", bytes)
+    elseif bytes < 1024 * 1024 then
+        return string.format("%.1fKB", bytes / 1024)
+    else
+        return string.format("%.2fMB", bytes / (1024 * 1024))
+    end
+end
+
+function NetPage:formatDuration(seconds)
+    if seconds < 60 then
+        return string.format("%ds", math.floor(seconds))
+    elseif seconds < 3600 then
+        return string.format("%dm", math.floor(seconds / 60))
+    elseif seconds < 86400 then
+        return string.format("%.1fh", seconds / 3600)
+    else
+        return string.format("%.1fd", seconds / 86400)
+    end
+end
+
+function NetPage:getNetworkStats()
+    local stats = {
+        totalConnections = #self.connections,
+        totalPacketsSent = 0,
+        totalPacketsReceived = 0,
+        totalBytesSent = 0,
+        totalBytesReceived = 0,
+        avgPing = 0,
+        connections = {}
+    }
+
+    local pingSum = 0
+    local pingCount = 0
+
+    for _, conn in ipairs(self.connections) do
+        if conn.metrics then
+            stats.totalPacketsSent = stats.totalPacketsSent + (conn.metrics.packetsSent or 0)
+            stats.totalPacketsReceived = stats.totalPacketsReceived + (conn.metrics.packetsReceived or 0)
+            stats.totalBytesSent = stats.totalBytesSent + (conn.metrics.bytesSent or 0)
+            stats.totalBytesReceived = stats.totalBytesReceived + (conn.metrics.bytesReceived or 0)
+
+            if conn.metrics.lastPing then
+                pingSum = pingSum + conn.metrics.lastPing
+                pingCount = pingCount + 1
+            end
+
+            table.insert(stats.connections, {
+                id = conn.id,
+                name = conn.name,
+                ping = conn.metrics.lastPing,
+                packetsSent = conn.metrics.packetsSent,
+                packetsReceived = conn.metrics.packetsReceived,
+                online = conn.presence and conn.presence.online or false,
+                dataFormatted = self:formatBytes((conn.metrics.bytesSent or 0) + (conn.metrics.bytesReceived or 0))
+            })
+        end
+    end
+
+    if pingCount > 0 then
+        stats.avgPing = math.floor(pingSum / pingCount)
+    end
+
+    return stats
 end
 
 -- Listener sets this when pair_ack received
 function NetPage:setPairingPin(pin)
     self.pairingPin = pin
+end
+
+function NetPage:broadcastAlive()
+    if not self.modem then return end
+
+    -- Send alive message to all connections
+    for _, conn in ipairs(self.connections) do
+        rednet.send(conn.id, {
+            type = "alive",
+            name = "Computer " .. self.computerId
+        }, "storage_pair")
+
+        self.logger:info("NetPage", "Sent alive broadcast to #" .. conn.id)
+    end
+end
+
+function NetPage:markConnectionOnline(computerId)
+    for _, conn in ipairs(self.connections) do
+        if conn.id == computerId then
+            if not conn.presence then
+                conn.presence = {}
+            end
+
+            conn.presence.online = true
+            conn.presence.lastSeen = os.epoch("utc")
+
+            self.logger:info("NetPage", "Marked connection #" .. computerId .. " as online")
+            self:saveConnections()
+
+            -- Refresh UI if in list mode or details mode
+            if self.mode == "list" or self.mode == "details" then
+                self:render()
+            end
+            break
+        end
+    end
+end
+
+function NetPage:checkConnectionHealth()
+    local now = os.epoch("utc")
+    local timeout = 15000 -- 15 seconds (3x ping interval)
+
+    for _, conn in ipairs(self.connections) do
+        if conn.presence then
+            local timeSinceLastSeen = now - (conn.presence.lastSeen or 0)
+
+            if timeSinceLastSeen > timeout and conn.presence.online then
+                conn.presence.online = false
+                self.logger:info("NetPage", "Marked connection #" .. conn.id .. " as offline (timeout)")
+                self:saveConnections()
+
+                -- Refresh UI if in list mode or details mode
+                if self.mode == "list" or self.mode == "details" then
+                    self:render()
+                end
+            end
+        end
+    end
 end
 
 return NetPage

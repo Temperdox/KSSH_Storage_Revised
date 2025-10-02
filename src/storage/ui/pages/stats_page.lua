@@ -432,9 +432,162 @@ function StatsPage:drawNetworkStats()
     term.write("NETWORK STATISTICS:")
     y = y + 2
 
+    -- Get network stats from NetPage
+    local netStats = nil
+    if self.context.router and self.context.router.pages and self.context.router.pages.net then
+        netStats = self.context.router.pages.net:getNetworkStats()
+    end
+
+    if not netStats or netStats.totalConnections == 0 then
+        term.setCursorPos(2, y)
+        term.setTextColor(colors.lightGray)
+        term.write("No network connections")
+        return
+    end
+
+    -- Summary metrics
+    term.setCursorPos(1, y)
+    term.setTextColor(colors.cyan)
+    term.write("== SUMMARY ==")
+    y = y + 1
+
+    -- Count online/offline
+    local onlineCount = 0
+    local offlineCount = 0
+    for _, conn in ipairs(netStats.connections) do
+        if conn.online then
+            onlineCount = onlineCount + 1
+        else
+            offlineCount = offlineCount + 1
+        end
+    end
+
     term.setCursorPos(2, y)
     term.setTextColor(colors.lightGray)
-    term.write("No network data available")
+    term.write("Connections: ")
+    term.setTextColor(colors.yellow)
+    term.write(tostring(netStats.totalConnections))
+    term.setTextColor(colors.lightGray)
+    term.write(" (")
+    term.setTextColor(colors.lime)
+    term.write(tostring(onlineCount))
+    term.setTextColor(colors.lightGray)
+    term.write(" online, ")
+    term.setTextColor(colors.red)
+    term.write(tostring(offlineCount))
+    term.setTextColor(colors.lightGray)
+    term.write(" offline)")
+    y = y + 1
+
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Packets Sent: ")
+    term.setTextColor(colors.lime)
+    term.write(tostring(netStats.totalPacketsSent))
+    term.setCursorPos(30, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Received: ")
+    term.setTextColor(colors.lime)
+    term.write(tostring(netStats.totalPacketsReceived))
+    y = y + 1
+
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Data Sent: ")
+    term.setTextColor(colors.orange)
+    term.write(netStats.totalBytesSent)
+    term.setCursorPos(30, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Received: ")
+    term.setTextColor(colors.orange)
+    term.write(netStats.totalBytesReceived)
+    y = y + 1
+
+    if netStats.averagePing then
+        term.setCursorPos(2, y)
+        term.setTextColor(colors.lightGray)
+        term.write("Average Ping: ")
+        term.setTextColor(colors.cyan)
+        term.write(string.format("%dms", netStats.averagePing))
+        y = y + 1
+    end
+
+    y = y + 1
+
+    -- Connections list
+    if #netStats.connections > 0 then
+        term.setCursorPos(1, y)
+        term.setTextColor(colors.cyan)
+        term.write("== CONNECTIONS ==")
+        y = y + 1
+
+        -- Table header
+        term.setCursorPos(1, y)
+        term.setBackgroundColor(colors.white)
+        term.setTextColor(colors.black)
+        term.clearLine()
+
+        term.setCursorPos(2, y)
+        term.write("NAME")
+        term.setCursorPos(15, y)
+        term.write("PACKETS")
+        term.setCursorPos(28, y)
+        term.write("DATA")
+        term.setCursorPos(40, y)
+        term.write("PING")
+        y = y + 1
+
+        -- Connections
+        for i, conn in ipairs(netStats.connections) do
+            if i % 2 == 0 then
+                term.setBackgroundColor(colors.gray)
+            else
+                term.setBackgroundColor(colors.black)
+            end
+
+            term.setCursorPos(1, y)
+            term.clearLine()
+
+            -- Name with online status color
+            term.setCursorPos(2, y)
+            if conn.online then
+                term.setTextColor(colors.lime)
+            else
+                term.setTextColor(colors.red)
+            end
+            local name = conn.name
+            if #name > 10 then
+                name = name:sub(1, 7) .. "..."
+            end
+            term.write(name)
+
+            -- Packets (sent/received)
+            term.setCursorPos(15, y)
+            term.setTextColor(colors.lime)
+            term.write(string.format("%d/%d", conn.packetsSent, conn.packetsReceived))
+
+            -- Data
+            term.setCursorPos(28, y)
+            term.setTextColor(colors.orange)
+            term.write(conn.dataFormatted)
+
+            -- Ping
+            if conn.ping then
+                term.setCursorPos(40, y)
+                term.setTextColor(colors.cyan)
+                term.write(string.format("%dms", conn.ping))
+            end
+
+            y = y + 1
+
+            -- Stop if we run out of space
+            if y >= self.height - 2 then
+                break
+            end
+        end
+
+        term.setBackgroundColor(colors.black)
+    end
 end
 
 function StatsPage:drawPoolStats()
