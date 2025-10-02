@@ -57,31 +57,16 @@ function ApiService:start()
             "API service started on protocol '%s' as '%s'",
             self.protocol, self.hostname
     ))
-end
 
-function ApiService:stop()
-    if self.modem then
-        rednet.unhost(self.protocol)
-        rednet.close(peripheral.getName(self.modem))
-    end
+    -- Subscribe to rednet messages via event bus instead of running own loop
+    self.eventBus:subscribe("raw.rednet_message", function(event, data)
+        if data and data.params and #data.params >= 3 then
+            local senderId = data.params[1]
+            local message = data.params[2]
+            local protocol = data.params[3]
 
-    self.logger:info("ApiService", "Service stopped")
-end
-
-function ApiService:run()
-    if not self.modem then
-        self.logger:warn("ApiService", "Cannot run - no modem available")
-        return
-    end
-
-    local processes = {}
-
-    -- Request handler process
-    table.insert(processes, function()
-        while true do
-            local senderId, message, protocol = rednet.receive(self.protocol, 1)
-
-            if senderId then
+            -- Only process messages for our protocol
+            if protocol == self.protocol then
                 -- Check rate limit
                 if not self:checkRateLimit(senderId) then
                     self:sendError(senderId, nil, "RATE_LIMIT", "Too many requests")
@@ -95,16 +80,27 @@ function ApiService:run()
         end
     end)
 
-    -- Timeout checker process
-    table.insert(processes, function()
-        while true do
-            self:checkTimeouts()
-            os.sleep(5)
-        end
-    end)
+    -- Start timeout checker
+    self:startTimeoutChecker()
+end
 
-    -- Run both in parallel
-    parallel.waitForAny(table.unpack(processes))
+function ApiService:stop()
+    if self.modem then
+        rednet.unhost(self.protocol)
+        rednet.close(peripheral.getName(self.modem))
+    end
+
+    self.logger:info("ApiService", "Service stopped")
+end
+
+-- Timeout checker runs in scheduler now
+function ApiService:startTimeoutChecker()
+    -- Schedule periodic timeout checks
+    self.context.timeWheel:schedule(5000, function()
+        self:checkTimeouts()
+        -- Reschedule for next check
+        self:startTimeoutChecker()
+    end)
 end
 
 function ApiService:processRequest(senderId, message)

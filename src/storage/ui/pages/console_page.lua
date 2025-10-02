@@ -113,7 +113,6 @@ function ConsolePage:onEnter()
 end
 
 function ConsolePage:onLeave()
-    -- Cleanup if needed
 end
 
 function ConsolePage:render()

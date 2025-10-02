@@ -162,7 +162,7 @@ local function startup()
             soundEnabled = true,
             soundVolume = 0.5,
             pools = {
-                io = 4,
+                io = 8,  -- Increased to support: input monitor, 3 transfer workers, storage monitor, sync, withdrawals
                 index = 2,
                 ui = 2,
                 net = 2
@@ -339,12 +339,7 @@ local function startup()
         end)
     end
 
-    -- Process 6: API Service
-    if context.services.api and context.services.api.modem then
-        table.insert(processes, function()
-            context.services.api:run()
-        end)
-    end
+    -- Process 6: API Service (now handled via event bus - no separate process needed)
 
     -- Process 7: Scheduler Workers
     table.insert(processes, function()
