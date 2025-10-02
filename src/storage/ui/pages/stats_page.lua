@@ -803,12 +803,14 @@ function StatsPage:loadStats()
     local uptimeFile = "/cfg/uptime.json"
     if fs.exists(uptimeFile) then
         local file = fs.open(uptimeFile, "r")
-        local content = file.readAll()
-        file.close()
+        if file then
+            local content = file.readAll()
+            file.close()
 
-        local ok, data = pcall(textutils.unserialiseJSON, content)
-        if ok and data then
-            self.stats.downtimeEvents = data.downtimes or {}
+            local ok, data = pcall(textutils.unserialiseJSON, content)
+            if ok and data then
+                self.stats.downtimeEvents = data.downtimes or {}
+            end
         end
     end
 
