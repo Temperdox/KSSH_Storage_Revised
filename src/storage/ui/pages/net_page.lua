@@ -20,7 +20,7 @@ function NetPage:new(context)
 
     o.computerId = os.getComputerID()
     o.connections = {}
-    o.mode = "list" -- list, generate, enter_name, enter_code, awaiting, verify_pin, requests, details
+    o.mode = "list" -- list, generate, enter_name, enter_code, awaiting, verify_pin, requests, details, select_type
     o.connectionName = ""
     o.enteredCode = ""
     o.currentCode = nil -- Current pairing code {code, pin, expiresAt}
@@ -165,6 +165,22 @@ function NetPage:startListener()
                     -- Received alive response - mark as online
                     self:markConnectionOnline(senderId)
                     self:trackPacket(senderId, "received", 50)
+
+                else
+                    -- Try connection type message handler
+                    local handled = false
+                    for _, conn in ipairs(self.connections) do
+                        if conn.id == senderId then
+                            if self.context.services.connectionTypes then
+                                handled = self.context.services.connectionTypes:handleMessage(conn, message)
+                            end
+                            break
+                        end
+                    end
+
+                    if not handled then
+                        self.logger:warn("NetPage", "Unhandled message type: " .. tostring(message.type))
+                    end
                 end
             end
         end
@@ -229,11 +245,12 @@ function NetPage:addConnection(id, name)
     end
 
     local now = os.epoch("utc")
-    table.insert(self.connections, {
+    local connection = {
         id = id,
         name = name,
         addedAt = now,
         systemType = "storage",
+        connectionTypeId = "storage",  -- Default to storage connection type
         metrics = {
             packetsSent = 0,
             packetsReceived = 0,
@@ -250,9 +267,15 @@ function NetPage:addConnection(id, name)
             online = false,  -- Start as offline until first response
             lastSeen = now
         }
-    })
+    }
 
+    table.insert(self.connections, connection)
     self:saveConnections()
+
+    -- Call connection type onConnect lifecycle
+    if self.context.services.connectionTypes then
+        self.context.services.connectionTypes:onConnect(connection)
+    end
 end
 
 function NetPage:removeConnection(conn)
@@ -287,6 +310,8 @@ function NetPage:render()
         self:drawRequestsMode()
     elseif self.mode == "details" then
         self:drawConnectionDetails()
+    elseif self.mode == "select_type" then
+        self:drawSelectTypeMode()
     end
 
     self:drawFooter()
@@ -731,6 +756,56 @@ function NetPage:drawRequestsMode()
     end
 end
 
+function NetPage:drawSelectTypeMode()
+    local y = 3
+
+    -- Back button
+    term.setCursorPos(2, y)
+    term.setBackgroundColor(colors.red)
+    term.setTextColor(colors.white)
+    term.write(" <- BACK ")
+    self.cancelButton = {y = y, x1 = 2, x2 = 11}
+
+    y = y + 2
+
+    term.setCursorPos(2, y)
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.cyan)
+    term.write("== SELECT CONNECTION TYPE ==")
+    y = y + 2
+
+    self.typeButtons = {}
+
+    if self.context.services.connectionTypes then
+        local types = self.context.services.connectionTypes:getConnectionTypes()
+
+        for i, connType in ipairs(types) do
+            term.setCursorPos(2, y)
+            term.setBackgroundColor(connType.color or colors.gray)
+            term.setTextColor(colors.white)
+
+            local line = string.format(" [%s] %s ", connType.icon or "?", connType.name)
+            term.write(line)
+
+            table.insert(self.typeButtons, {
+                y = y,
+                x1 = 2,
+                x2 = 2 + #line - 1,
+                type = connType
+            })
+
+            term.setBackgroundColor(colors.black)
+            term.setCursorPos(2 + #line + 2, y)
+            term.setTextColor(colors.lightGray)
+            term.write(connType.description or "")
+
+            y = y + 1
+
+            if y >= self.height - 2 then break end
+        end
+    end
+end
+
 function NetPage:drawFooter()
     term.setCursorPos(1, self.height)
     term.setBackgroundColor(colors.gray)
@@ -754,6 +829,8 @@ function NetPage:drawFooter()
         term.write("Click ACCEPT to pair with a computer")
     elseif self.mode == "details" then
         term.write("Connection metrics | Pings every 5 seconds")
+    elseif self.mode == "select_type" then
+        term.write("Click a connection type to assign it to this connection")
     end
 end
 
@@ -974,6 +1051,37 @@ function NetPage:handleClick(x, y)
                 self:attemptConnect()
             end
         end
+
+    elseif self.mode == "details" then
+        -- Type change button
+        if self.typeChangeButton and self.typeChangeButton.y == y and x >= self.typeChangeButton.x1 and x <= self.typeChangeButton.x2 then
+            self.mode = "select_type"
+            self:render()
+            return
+        end
+
+    elseif self.mode == "select_type" then
+        -- Type selection buttons
+        if self.typeButtons then
+            for _, btn in ipairs(self.typeButtons) do
+                if y == btn.y and x >= btn.x1 and x <= btn.x2 then
+                    -- Update connection type
+                    if self.selectedConnection then
+                        self.selectedConnection.connectionTypeId = btn.type.id
+                        self:saveConnections()
+
+                        -- Call new connection type onConnect
+                        if self.context.services.connectionTypes then
+                            self.context.services.connectionTypes:onConnect(self.selectedConnection)
+                        end
+                    end
+
+                    self.mode = "details"
+                    self:render()
+                    return
+                end
+            end
+        end
     end
 end
 
@@ -1109,6 +1217,30 @@ function NetPage:drawConnectionDetails()
     term.setTextColor(colors.lime)
     local connTime = (os.epoch("utc") - conn.metrics.connectedAt) / 1000
     term.write(self:formatDuration(connTime))
+    y = y + 1
+
+    -- Connection Type Dropdown
+    term.setCursorPos(2, y)
+    term.setTextColor(colors.lightGray)
+    term.write("Type:")
+    term.setCursorPos(20, y)
+
+    local connectionType = nil
+    if self.context.services.connectionTypes then
+        connectionType = self.context.services.connectionTypes:getConnectionType(conn.connectionTypeId or "storage")
+    end
+
+    local typeName = connectionType and connectionType.name or "Unknown"
+    term.setBackgroundColor(colors.gray)
+    term.setTextColor(colors.white)
+    term.write(" " .. typeName .. " ")
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.cyan)
+    term.write(" [CHANGE] ")
+
+    -- Store dropdown button region
+    self.typeChangeButton = {y = y, x1 = 20 + #typeName + 3, x2 = 20 + #typeName + 12}
+
     y = y + 2
 
     -- Network metrics
@@ -1181,6 +1313,17 @@ function NetPage:drawConnectionDetails()
         term.setTextColor(colors.gray)
         term.write("N/A")
     end
+    y = y + 2
+
+    -- Connection type-specific details
+    local connectionType = nil
+    if self.context.services.connectionTypes then
+        connectionType = self.context.services.connectionTypes:getConnectionType(conn.connectionTypeId or "storage")
+    end
+
+    if connectionType and connectionType.drawDetails then
+        y = connectionType:drawDetails(conn, 2, y, self.width - 4, self.height - y - 2)
+    end
 end
 
 function NetPage:startPingService()
@@ -1194,6 +1337,11 @@ function NetPage:startPingService()
                 }, "storage_pair")
 
                 self:trackPacket(conn.id, "sent", 50)
+
+                -- Call connection type onUpdate
+                if self.context.services.connectionTypes then
+                    self.context.services.connectionTypes:onUpdate(conn)
+                end
             end
 
             -- Check connection health (mark offline if no response)

@@ -62,6 +62,7 @@ local function startup()
     local SettingsService = require("services.settings_service")
     local SoundService = require("services.sound_service")
     local EventsBridge = require("services.events_bridge")
+    local ConnectionTypeRegistry = require("services.connection_type_registry")
 
     -- UI modules
     local Router = require("ui.router")
@@ -70,6 +71,7 @@ local function startup()
     local TestsPage = require("ui.pages.tests_page")
     local SettingsPage = require("ui.pages.settings_page")
     local NetPage = require("ui.pages.net_page")
+    local WithdrawPage = require("ui.pages.withdraw_page")
 
     -- Command modules
     local CommandFactory = require("factories.command_factory")
@@ -242,6 +244,7 @@ local function startup()
     -- Initialize services
     context.services = {
         events = EventsBridge:new(context),
+        connectionTypes = ConnectionTypeRegistry:new(context),
         storage = StorageService:new(context),
         monitor = MonitorService:new(context),
         api = ApiService:new(context),
@@ -252,7 +255,7 @@ local function startup()
     }
 
     -- Start services in specific order to ensure proper event flow
-    local serviceOrder = {"events", "monitor", "storage", "api", "stats", "tests", "settings", "sound"}
+    local serviceOrder = {"events", "connectionTypes", "monitor", "storage", "api", "stats", "tests", "settings", "sound"}
     for _, name in ipairs(serviceOrder) do
         local service = context.services[name]
         if service and service.start then
@@ -275,6 +278,7 @@ local function startup()
     router:register("tests", TestsPage:new(context))
     router:register("settings", SettingsPage:new(context))
     router:register("net", NetPage:new(context))
+    router:register("withdraw", WithdrawPage:new(context))
 
     -- Navigate to console page
     router:navigate("console")
