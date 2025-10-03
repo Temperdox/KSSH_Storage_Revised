@@ -1184,7 +1184,7 @@ function NetPage:drawConnectionDetails()
 end
 
 function NetPage:startPingService()
-    self.context.scheduler:submit("net_ping", function()
+    self.context.scheduler:submit("net", function()
         while self.listenerRunning do
             for _, conn in ipairs(self.connections) do
                 -- Send ping
