@@ -1,0 +1,81 @@
+// Dark Theme for KSSH Storage UI
+
+// Global defaults
+* {
+    bg: colors.black;
+    fg: colors.white;
+}
+
+// Labels
+label {
+    bg: colors.black;
+    fg: colors.white;
+}
+
+// Buttons
+button {
+    bg: colors.gray;
+    fg: colors.white;
+    hoverBg: colors.lightGray;
+    hoverFg: colors.white;
+    clickBg: colors.white;
+    clickFg: colors.black;
+    disabledBg: colors.gray;
+    disabledFg: colors.lightGray;
+}
+
+// Panels
+panel {
+    bg: colors.black;
+    fg: colors.white;
+    border: {enabled: true, color: colors.gray, char: -};
+    padding: {top: 1, right: 1, bottom: 1, left: 1};
+}
+
+// Lists
+list {
+    bg: colors.black;
+    fg: colors.white;
+    selectedBg: colors.gray;
+    selectedFg: colors.yellow;
+    hoverBg: colors.lightGray;
+}
+
+// Windows
+window {
+    bg: colors.black;
+    fg: colors.white;
+}
+
+// Custom ID styles
+#header {
+    bg: colors.gray;
+    fg: colors.yellow;
+}
+
+#primaryButton {
+    bg: colors.green;
+    fg: colors.white;
+    hoverBg: colors.lime;
+}
+
+#dangerButton {
+    bg: colors.red;
+    fg: colors.white;
+    hoverBg: colors.orange;
+}
+
+#successMessage {
+    bg: colors.lime;
+    fg: colors.black;
+}
+
+#errorMessage {
+    bg: colors.red;
+    fg: colors.white;
+}
+
+#infoMessage {
+    bg: colors.blue;
+    fg: colors.white;
+}

@@ -8,9 +8,7 @@ StatsPage.__index = StatsPage
 
 function StatsPage:new(context)
     local o = BasePage.new(self, context, "stats")
-
-    o.eventBus = context.eventBus
-    o.logger = context.logger
+    o:setTitle("SYSTEM STATISTICS")
 
     -- Stats data
     o.stats = {
@@ -36,10 +34,6 @@ function StatsPage:new(context)
     o.uptimeGraph = nil
     o.uptimeData = {}
 
-    -- Custom header - don't use base page header
-    o.header:removeAll()
-    o.header.height = 0  -- Hide the header panel completely
-
     return o
 end
 
@@ -52,19 +46,8 @@ function StatsPage:onEnter()
         self:updateStats(event, data)
     end)
 
-    -- Start refresh timer for overview tab (10fps)
-    self.refreshTimer = os.startTimer(0.1)
-
     self:buildUI()
     self:render()
-end
-
-function StatsPage:onExit()
-    -- Cancel refresh timer
-    if self.refreshTimer then
-        os.cancelTimer(self.refreshTimer)
-        self.refreshTimer = nil
-    end
 end
 
 function StatsPage:buildUI()
@@ -86,124 +69,7 @@ function StatsPage:buildUI()
         self:buildPoolStats()
     end
 
-    self:updateFooter()
-end
-
-function StatsPage:updateFooter()
     self:setFooter("Updated: " .. os.date("%H:%M:%S") .. " | Use 1-5 keys to switch tabs")
-end
-
-function StatsPage:updateDynamicData()
-    -- Update labels without rebuilding UI (prevents flicker)
-    if self.selectedTab == "overview" and self.metricLabels then
-        -- Calculate metrics
-        local totalEvents = 0
-        if type(self.stats.eventRates) == "table" then
-            for _, eventData in pairs(self.stats.eventRates) do
-                if type(eventData) == "number" then
-                    totalEvents = totalEvents + eventData
-                elseif type(eventData) == "table" and eventData.count then
-                    totalEvents = totalEvents + eventData.count
-                end
-            end
-        end
-
-        local eventsPerSec = self:calculateEventRate()
-        local activeTasks = self:getActiveTasks()
-        local itemsIndexed = self:getIndexedItems()
-        local storageUsed = self:getStorageUsage()
-
-        -- Update labels
-        if self.metricLabels.totalEvents then
-            self.metricLabels.totalEvents:setText(tostring(totalEvents))
-        end
-
-        if self.metricLabels.eventsPerSec then
-            self.metricLabels.eventsPerSec:setText(eventsPerSec)
-        end
-
-        if self.metricLabels.activeTasks then
-            self.metricLabels.activeTasks:setText(tostring(activeTasks))
-        end
-
-        if self.metricLabels.itemsIndexed then
-            self.metricLabels.itemsIndexed:setText(tostring(itemsIndexed))
-        end
-
-        if self.metricLabels.storageUsed then
-            self.metricLabels.storageUsed:setText(storageUsed .. "%")
-        end
-
-        -- Update uptime graph
-        if self.uptimeGraph then
-            self.uptimeData = self:loadUptimeData()
-            self.uptimeGraph:setData(self.uptimeData)
-            self.averageUptime = self:calculateAverageUptime()
-
-            if not self.uptimeGraph.hoveredIndex and self.hoveredLabel then
-                self.hoveredLabel:setText(string.format("%.1f%%", self.averageUptime))
-            end
-        end
-
-        -- Just re-render without rebuilding
-        self.root:render()
-        self:renderHeader()
-        term.setCursorBlink(false)
-    end
-end
-
-function StatsPage:renderHeader()
-    -- Draw header background
-    term.setCursorPos(1, 1)
-    term.setBackgroundColor(colors.gray)
-    term.clearLine()
-
-    -- Store clickable regions
-    self.navButtons = {}
-
-    -- Navigation bar
-    local x = 2
-
-    -- Console button
-    term.setCursorPos(x, 1)
-    term.setBackgroundColor(colors.gray)
-    term.setTextColor(colors.white)
-    term.write("[Console]")
-    self.navButtons.console = {y = 1, x1 = x, x2 = x + 8}
-    x = x + 10
-
-    -- Net button
-    term.setCursorPos(x, 1)
-    term.setBackgroundColor(colors.gray)
-    term.setTextColor(colors.lightBlue)
-    term.write("[Net]")
-    self.navButtons.net = {y = 1, x1 = x, x2 = x + 4}
-    x = x + 6
-
-    -- Stats button (active)
-    term.setCursorPos(x, 1)
-    term.setBackgroundColor(colors.lightGray)
-    term.setTextColor(colors.black)
-    term.write("[Stats]")
-    self.navButtons.stats = {y = 1, x1 = x, x2 = x + 6}
-    x = x + 8
-
-    -- Tests button
-    term.setCursorPos(x, 1)
-    term.setBackgroundColor(colors.gray)
-    term.setTextColor(colors.lime)
-    term.write("[Tests]")
-    self.navButtons.tests = {y = 1, x1 = x, x2 = x + 6}
-    x = x + 8
-
-    -- Settings button
-    term.setCursorPos(x, 1)
-    term.setBackgroundColor(colors.gray)
-    term.setTextColor(colors.orange)
-    term.write("[Settings]")
-    self.navButtons.settings = {y = 1, x1 = x, x2 = x + 9}
-
-    term.setBackgroundColor(colors.black)
 end
 
 function StatsPage:buildTabs()
@@ -233,22 +99,6 @@ function StatsPage:buildTabs()
     self.content:add(tabPanel)
 end
 
-function StatsPage:render()
-    term.setBackgroundColor(colors.black)
-    term.clear()
-
-    -- Update and render framework components first
-    UI.update()
-    self.root:render()
-    UI.renderWindows()
-
-    -- Then render manual overlays on top
-    self:renderHeader()
-
-    -- Hide cursor
-    term.setCursorBlink(false)
-end
-
 function StatsPage:buildOverview()
     local y = 3
 
@@ -258,16 +108,11 @@ function StatsPage:buildOverview()
 
     self.content:add(uptimeLabel)
 
-    -- Calculate overall average uptime
-    local avgUptime = self:calculateAverageUptime()
-
-    -- Hovered value label - shows overall average when not hovering
-    local hoveredLabel = UI.label(string.format("%.1f%%", avgUptime), 9, y)
+    -- Hovered value label
+    local hoveredLabel = UI.label("", 9, y)
         :fg(colors.yellow)
 
     self.hoveredLabel = hoveredLabel
-    self.uptimeLabel = uptimeLabel
-    self.averageUptime = avgUptime
     self.content:add(hoveredLabel)
 
     y = y + 1
@@ -289,9 +134,6 @@ function StatsPage:buildOverview()
 
     y = y + 1
 
-    -- Store references to metric value labels for live updates
-    self.metricLabels = {}
-
     -- Calculate metrics
     local totalEvents = 0
     if type(self.stats.eventRates) == "table" then
@@ -305,11 +147,11 @@ function StatsPage:buildOverview()
     end
 
     local metrics = {
-        {"Total Events", totalEvents, colors.cyan, "totalEvents"},
-        {"Events/sec", self:calculateEventRate(), colors.lime, "eventsPerSec"},
-        {"Active Tasks", self:getActiveTasks(), colors.yellow, "activeTasks"},
-        {"Items Indexed", self:getIndexedItems(), colors.orange, "itemsIndexed"},
-        {"Storage Used", self:getStorageUsage() .. "%", colors.magenta, "storageUsed"}
+        {"Total Events", totalEvents, colors.cyan},
+        {"Events/sec", self:calculateEventRate(), colors.lime},
+        {"Active Tasks", self:getActiveTasks(), colors.yellow},
+        {"Items Indexed", self:getIndexedItems(), colors.orange},
+        {"Storage Used", self:getStorageUsage() .. "%", colors.magenta}
     }
 
     -- Draw metrics in two columns
@@ -327,9 +169,6 @@ function StatsPage:buildOverview()
             local leftValue = UI.label(tostring(metrics[leftIdx][2]), 2 + #(metrics[leftIdx][1]) + 2, y + row - 1)
                 :fg(metrics[leftIdx][3])
 
-            -- Store reference for updates
-            self.metricLabels[metrics[leftIdx][4]] = leftValue
-
             self.content:add(leftLabel)
             self.content:add(leftValue)
         end
@@ -340,9 +179,6 @@ function StatsPage:buildOverview()
                 :fg(colors.lightGray)
             local rightValue = UI.label(tostring(metrics[rightIdx][2]), columnWidth + 2 + #(metrics[rightIdx][1]) + 2, y + row - 1)
                 :fg(metrics[rightIdx][3])
-
-            -- Store reference for updates
-            self.metricLabels[metrics[rightIdx][4]] = rightValue
 
             self.content:add(rightLabel)
             self.content:add(rightValue)
@@ -793,38 +629,7 @@ function StatsPage:showPoolModal(poolName, pool)
 end
 
 function StatsPage:handleInput(event, param1, param2, param3)
-    if event == "timer" then
-        if param1 == self.refreshTimer then
-            -- Only refresh if on overview tab
-            if self.selectedTab == "overview" then
-                -- Run stats update in background thread to avoid blocking UI
-                self.context.scheduler:submit("ui", function()
-                    -- Refresh stats data
-                    self:loadStats()
-
-                    -- Update dynamic data without rebuilding (prevents flicker)
-                    self:updateDynamicData()
-                end)
-            end
-
-            -- Restart timer
-            self.refreshTimer = os.startTimer(0.1)
-            return
-        end
-    elseif event == "term_resize" then
-        self.width, self.height = term.getSize()
-
-        -- Rebuild UI components with new dimensions
-        self.root:setSize(self.width, self.height)
-        self.header:setSize(self.width, 1)
-        self.content:setSize(self.width, self.height - 2)
-        self.footer:setPosition(1, self.height)
-        self.footer:setSize(self.width, 1)
-
-        self:buildUI()
-        self:render()
-        return
-    elseif event == "key" then
+    if event == "key" then
         local key = param1
 
         -- Tab switching with number keys
@@ -838,74 +643,23 @@ function StatsPage:handleInput(event, param1, param2, param3)
             return
         end
     elseif event == "mouse_move" or event == "mouse_drag" then
-        -- Update uptime graph hover - trigger immediate re-render
+        -- Update uptime graph hover
         if self.uptimeGraph and self.selectedTab == "overview" then
             local oldHovered = self.uptimeGraph.hoveredIndex
             self.uptimeGraph:handleMouseMove(param1, param2)
 
             if oldHovered ~= self.uptimeGraph.hoveredIndex then
-                -- Update hovered label immediately
+                -- Update hovered label
                 local hoveredValue = self.uptimeGraph:getHoveredValue()
                 if hoveredValue then
-                    -- Show hovered column percentage
                     self.hoveredLabel:setText(string.format("%.1f%%", hoveredValue))
                 else
-                    -- Show overall average when not hovering
-                    self.hoveredLabel:setText(string.format("%.1f%%", self.averageUptime or 0))
+                    self.hoveredLabel:setText("")
                 end
-
-                -- Immediate re-render for responsive hover feedback
-                term.setBackgroundColor(colors.black)
-                term.clear()
-
-                UI.update()
-                self.root:render()
-                UI.renderWindows()
-
-                self:renderHeader()
-
-                term.setCursorBlink(false)
+                self:render()
             end
         end
-
-        -- Pass to base page for other hover effects
-        BasePage.handleInput(self, event, param1, param2, param3)
         return
-    elseif event == "mouse_click" then
-        local button, x, y = param1, param2, param3
-
-        -- Check navigation button clicks
-        if self.navButtons then
-            if self.navButtons.console and y == self.navButtons.console.y and
-               x >= self.navButtons.console.x1 and x <= self.navButtons.console.x2 then
-                if self.context.router then
-                    self.context.router:navigate("console")
-                end
-                return
-            elseif self.navButtons.net and y == self.navButtons.net.y and
-               x >= self.navButtons.net.x1 and x <= self.navButtons.net.x2 then
-                if self.context.router then
-                    self.context.router:navigate("net")
-                end
-                return
-            elseif self.navButtons.stats and y == self.navButtons.stats.y and
-                   x >= self.navButtons.stats.x1 and x <= self.navButtons.stats.x2 then
-                -- Already on stats page, do nothing
-                return
-            elseif self.navButtons.tests and y == self.navButtons.tests.y and
-                   x >= self.navButtons.tests.x1 and x <= self.navButtons.tests.x2 then
-                if self.context.router then
-                    self.context.router:navigate("tests")
-                end
-                return
-            elseif self.navButtons.settings and y == self.navButtons.settings.y and
-                   x >= self.navButtons.settings.x1 and x <= self.navButtons.settings.x2 then
-                if self.context.router then
-                    self.context.router:navigate("settings")
-                end
-                return
-            end
-        end
     end
 
     BasePage.handleInput(self, event, param1, param2, param3)
@@ -974,20 +728,6 @@ function StatsPage:loadUptimeData()
     end
 
     return data
-end
-
-function StatsPage:calculateAverageUptime()
-    -- Calculate average uptime from uptime data
-    if not self.uptimeData or #self.uptimeData == 0 then
-        return 100
-    end
-
-    local total = 0
-    for _, uptime in ipairs(self.uptimeData) do
-        total = total + uptime
-    end
-
-    return total / #self.uptimeData
 end
 
 function StatsPage:calculateEventRate()

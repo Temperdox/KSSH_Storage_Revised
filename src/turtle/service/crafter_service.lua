@@ -43,8 +43,60 @@ function CrafterService:init()
             break
         end
     end
+
+    -- Register craft request handler
+    if self.bridge then
+        self.bridge:register("craft_request", function(sender, msg)
+            return self:handleCraftRequest(sender, msg)
+        end)
+        logf("info", "[crafter] Registered craft_request handler")
+    end
+
     logf("info", "[crafter] Initialized. Buffer side:", self.bufferDirection)
     return true
+end
+
+-- Handle craft request from computer
+function CrafterService:handleCraftRequest(sender, msg)
+    local itemName = msg.item_name
+    local amount = msg.amount or 1
+    local autocraft = msg.autocraft or false
+
+    logf("info", "[crafter] Craft request from", sender, ":", itemName, "x" .. amount,
+         "(autocraft:", tostring(autocraft) .. ")")
+
+    -- Request ingredients from computer
+    self.bridge:send({
+        action = "request_ingredients",
+        item_name = itemName,
+        amount = amount
+    }, sender)
+
+    -- Wait for ingredients (this will be handled by buffer suck logic)
+    -- For now, assume ingredients arrive in buffer
+
+    -- Craft the items
+    local crafted = 0
+    local success, error, count = self:craftN(amount)
+
+    if success then
+        crafted = count
+        logf("info", "[crafter] Successfully crafted", crafted, "x", itemName)
+    else
+        logf("error", "[crafter] Craft failed:", error or "unknown")
+    end
+
+    -- Send result back to computer
+    self.bridge:send({
+        action = "craft_result",
+        item_name = itemName,
+        requested = amount,
+        crafted = crafted,
+        success = success,
+        error = error
+    }, sender)
+
+    return success
 end
 
 function CrafterService:setBuffer(dir)

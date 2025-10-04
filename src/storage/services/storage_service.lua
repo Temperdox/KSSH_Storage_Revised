@@ -627,6 +627,18 @@ function StorageService:withdraw(itemName, requestedCount)
                 if ok and slots then
                     for slot, slotItem in pairs(slots) do
                         if slotItem.name == itemName and remaining > 0 then
+                            -- SAFETY: Double-check the item still exists in slot
+                            -- Prevents errors when index is stale (item was removed manually)
+                            local ok2, currentSlot = pcall(function() return inv.getItemDetail(slot) end)
+                            if not ok2 or not currentSlot or currentSlot.name ~= itemName then
+                                -- Item was removed, index is stale - skip this slot
+                                self.logger:warn("StorageService", string.format(
+                                    "Index mismatch: slot %d in %s - expected %s, found %s",
+                                    slot, storage.name, itemName, currentSlot and currentSlot.name or "empty"
+                                ))
+                                goto continue
+                            end
+
                             local toMove = math.min(remaining, slotItem.count)
 
                             -- Use network ID for output!
@@ -642,6 +654,8 @@ function StorageService:withdraw(itemName, requestedCount)
                                     from = storage.name
                                 })
                             end
+
+                            ::continue::
                         end
                     end
                 end

@@ -1024,30 +1024,61 @@ function MonitorService:drawOrderModal()
     local maxAmount = self.selectedItem.value.count or 0
     local stackSize = self.selectedItem.value.stackSize or 64
 
+    -- Initialize item info tab state if not exists
+    if not self.itemInfoTab then
+        self.itemInfoTab = "ORDER"  -- ORDER or CRAFT
+    end
+    if not self.craftAmount then
+        self.craftAmount = 1
+    end
+    if not self.autocraft then
+        self.autocraft = false
+    end
+
     -- Draw modal background
     self.frameBuffer:fillRect(startX, startY, modalWidth, modalHeight, " ", colors.white, colors.gray)
 
-    -- Draw modal header
+    -- Draw modal header with item name
     self.frameBuffer:fillRect(startX, startY, modalWidth, 1, " ", colors.black, colors.lightGray)
-    self.frameBuffer:writeText(startX + 2, startY, "ORDER ITEM", colors.black, colors.lightGray)
+    local displayName = itemName
+    if #displayName > modalWidth - 8 then
+        displayName = displayName:sub(1, modalWidth - 11) .. "..."
+    end
+    self.frameBuffer:writeText(startX + 2, startY, displayName, colors.black, colors.lightGray)
 
     -- Close button
     self.frameBuffer:writeText(startX + modalWidth - 4, startY, "[X]", colors.red, colors.lightGray)
 
-    -- Draw content
-    local contentY = startY + 2
+    -- Draw tabs (row 2)
+    local tabY = startY + 1
+    self.frameBuffer:fillRect(startX, tabY, modalWidth, 1, " ", colors.white, colors.gray)
+
+    -- ORDER tab
+    local orderTabBg = self.itemInfoTab == "ORDER" and colors.lightGray or colors.gray
+    local orderTabFg = self.itemInfoTab == "ORDER" and colors.black or colors.lightGray
+    self.frameBuffer:writeText(startX + 2, tabY, " ORDER ", orderTabFg, orderTabBg)
+
+    -- CRAFT tab
+    local craftTabBg = self.itemInfoTab == "CRAFT" and colors.lightGray or colors.gray
+    local craftTabFg = self.itemInfoTab == "CRAFT" and colors.black or colors.lightGray
+    self.frameBuffer:writeText(startX + 11, tabY, " CRAFT ", craftTabFg, craftTabBg)
+
+    -- Draw content based on active tab
+    local contentY = startY + 3
     local contentX = startX + 2
 
-    -- Item name (truncate if too long)
-    local displayName = itemName
-    if #displayName > modalWidth - 4 then
-        displayName = displayName:sub(1, modalWidth - 7) .. "..."
-    end
-    self.frameBuffer:writeText(contentX, contentY, displayName, colors.white, colors.gray)
-    contentY = contentY + 1
-
+    -- Show available count for both tabs
     self.frameBuffer:writeText(contentX, contentY, string.format("Available: %d", maxAmount), colors.lightGray, colors.gray)
     contentY = contentY + 2
+
+    if self.itemInfoTab == "ORDER" then
+        self:drawOrderTab(contentX, contentY, modalWidth, startX, startY, modalHeight, maxAmount, stackSize)
+    elseif self.itemInfoTab == "CRAFT" then
+        self:drawCraftTab(contentX, contentY, modalWidth, startX, startY, modalHeight, maxAmount, itemName)
+    end
+end
+
+function MonitorService:drawOrderTab(contentX, contentY, modalWidth, startX, startY, modalHeight, maxAmount, stackSize)
 
     -- Amount field
     self.frameBuffer:writeText(contentX, contentY, "Amount:", colors.white, colors.gray)
@@ -1116,6 +1147,192 @@ function MonitorService:drawOrderModal()
 
     self.frameBuffer:writeText(cancelX, buttonY, "[Cancel]", colors.lightGray, colors.gray)
     self.frameBuffer:writeText(confirmX, buttonY, "[Confirm]", colors.lime, colors.gray)
+end
+
+function MonitorService:drawCraftTab(contentX, contentY, modalWidth, startX, startY, modalHeight, maxAmount, itemName)
+    -- Amount field
+    self.frameBuffer:writeText(contentX, contentY, "Craft Amount:", colors.white, colors.gray)
+    contentY = contentY + 1
+
+    -- Amount controls line (triple arrow system)
+    local controlsY = contentY
+    local controlsX = contentX + 2
+
+    -- Triple left button (<<<)
+    self.frameBuffer:writeText(controlsX, controlsY, "<<<", colors.cyan, colors.gray)
+    controlsX = controlsX + 4
+
+    -- Double left button (<<)
+    self.frameBuffer:writeText(controlsX, controlsY, "<<", colors.cyan, colors.gray)
+    controlsX = controlsX + 3
+
+    -- Single left button (<)
+    self.frameBuffer:writeText(controlsX, controlsY, "<", colors.cyan, colors.gray)
+    controlsX = controlsX + 2
+
+    -- Amount display
+    local amountStr = tostring(self.craftAmount)
+    self.frameBuffer:fillRect(controlsX, controlsY, 8, 1, " ", colors.white, colors.black)
+    local amountX = controlsX + math.floor((8 - #amountStr) / 2)
+    self.frameBuffer:writeText(amountX, controlsY, amountStr, colors.white, colors.black)
+    controlsX = controlsX + 9
+
+    -- Single right button (>)
+    self.frameBuffer:writeText(controlsX, controlsY, ">", colors.cyan, colors.gray)
+    controlsX = controlsX + 2
+
+    -- Double right button (>>)
+    self.frameBuffer:writeText(controlsX, controlsY, ">>", colors.cyan, colors.gray)
+    controlsX = controlsX + 3
+
+    -- Triple right button (>>>)
+    self.frameBuffer:writeText(controlsX, controlsY, ">>>", colors.cyan, colors.gray)
+
+    contentY = contentY + 2
+
+    -- Autocraft checkbox
+    local checkboxChar = self.autocraft and "X" or " "
+    self.frameBuffer:writeText(contentX, contentY, "[" .. checkboxChar .. "] Autocraft", colors.yellow, colors.gray)
+    contentY = contentY + 2
+
+    -- Calculate if we can craft the requested amount
+    local craftable = self:calculateCraftable(itemName, self.craftAmount)
+
+    -- Warning message if insufficient items
+    if not craftable.canCraftAll then
+        if self.autocraft then
+            -- Show warning with partial craft info
+            self.frameBuffer:writeText(contentX, contentY, "Warning:", colors.orange, colors.gray)
+            contentY = contentY + 1
+            self.frameBuffer:writeText(contentX, contentY, "Cannot craft requested amount", colors.lightGray, colors.gray)
+            contentY = contentY + 1
+            self.frameBuffer:writeText(contentX, contentY, string.format("Will craft %d now", craftable.canCraft), colors.lime, colors.gray)
+            contentY = contentY + 1
+            self.frameBuffer:writeText(contentX, contentY, "Will craft rest when available", colors.lightGray, colors.gray)
+            contentY = contentY + 1
+        else
+            -- Show error - cannot craft
+            self.frameBuffer:writeText(contentX, contentY, "Insufficient items!", colors.red, colors.gray)
+            contentY = contentY + 1
+            self.frameBuffer:writeText(contentX, contentY, string.format("Can only craft %d", craftable.canCraft), colors.lightGray, colors.gray)
+            contentY = contentY + 1
+        end
+    end
+
+    -- Buttons
+    local buttonY = startY + modalHeight - 2
+    local cancelX = startX + 2
+    local craftX = startX + modalWidth - 10
+
+    self.frameBuffer:writeText(cancelX, buttonY, "[Cancel]", colors.lightGray, colors.gray)
+
+    -- Craft button - disabled if insufficient items AND autocraft is off
+    local canCraft = craftable.canCraftAll or self.autocraft
+    local craftColor = canCraft and colors.lime or colors.gray
+    self.frameBuffer:writeText(craftX, buttonY, "[Craft]", craftColor, colors.gray)
+end
+
+function MonitorService:calculateCraftable(itemName, requestedAmount)
+    -- Load recipes from disk (if available)
+    local recipes = self:loadRecipes()
+
+    -- Check if recipe exists for this item
+    local fullItemName = nil
+    for _, item in ipairs(self.itemCache) do
+        local shortName = item.key:match("([^:]+)$")
+        if shortName == itemName then
+            fullItemName = item.key
+            break
+        end
+    end
+
+    if not fullItemName then
+        return {
+            canCraftAll = false,
+            canCraft = 0,
+            missing = {itemName}
+        }
+    end
+
+    local recipe = recipes[fullItemName]
+
+    if not recipe then
+        -- No recipe found
+        return {
+            canCraftAll = false,
+            canCraft = 0,
+            missing = {fullItemName}
+        }
+    end
+
+    -- Calculate how many we can craft with available ingredients
+    local canCraftBatches = math.huge
+    local missing = {}
+
+    -- Count required ingredients from pattern
+    local ingredientCounts = {}
+    for _, row in ipairs(recipe.pattern) do
+        for _, ingredient in ipairs(row) do
+            if ingredient then
+                ingredientCounts[ingredient] = (ingredientCounts[ingredient] or 0) + 1
+            end
+        end
+    end
+
+    -- Check each ingredient
+    for ingredient, countPerBatch in pairs(ingredientCounts) do
+        local available = 0
+
+        -- Find ingredient in cache
+        for _, item in ipairs(self.itemCache) do
+            if item.key == ingredient then
+                available = item.value.count or 0
+                break
+            end
+        end
+
+        local batchesFromThis = math.floor(available / countPerBatch)
+
+        if batchesFromThis == 0 then
+            table.insert(missing, ingredient)
+        end
+
+        canCraftBatches = math.min(canCraftBatches, batchesFromThis)
+    end
+
+    -- If no ingredients or all missing, can't craft any
+    if canCraftBatches == math.huge then
+        canCraftBatches = 0
+    end
+
+    -- Each batch produces recipe.result.count items
+    local itemsPerBatch = recipe.result.count or 1
+    local totalCanCraft = canCraftBatches * itemsPerBatch
+
+    return {
+        canCraftAll = totalCanCraft >= requestedAmount,
+        canCraft = totalCanCraft,
+        missing = missing
+    }
+end
+
+function MonitorService:loadRecipes()
+    -- Load recipes from disk drive (future implementation will sync with turtle)
+    local recipePath = "/disk/recipes.json"
+
+    if fs.exists(recipePath) then
+        local file = fs.open(recipePath, "r")
+        local content = file.readAll()
+        file.close()
+
+        local recipes = textutils.unserialiseJSON(content)
+        if recipes and type(recipes) == "table" then
+            return recipes
+        end
+    end
+
+    -- Return empty recipes table if file doesn't exist
+    return {}
 end
 
 function MonitorService:drawLocationsModal()
@@ -1616,81 +1833,180 @@ function MonitorService:handleClick(x, y)
             return
         end
 
-        -- Amount controls
-        local controlsY = startY + 6
-        local controlsX = startX + 4
-
-        local maxAmount = self.selectedItem and (self.selectedItem.value.count or 0) or 0
-        local stackSize = self.selectedItem and (self.selectedItem.value.stackSize or 64) or 64
-
-        if y == controlsY then
-            -- <<< button (decrease by stack size)
-            if x >= controlsX and x <= controlsX + 2 then
-                self.orderAmount = math.max(1, self.orderAmount - stackSize)
+        -- Tab clicks (row 2)
+        local tabY = startY + 1
+        if y == tabY then
+            -- ORDER tab
+            if x >= startX + 2 and x <= startX + 8 then
+                self.itemInfoTab = "ORDER"
                 return
             end
-            controlsX = controlsX + 4
-
-            -- << button (decrease by 10)
-            if x >= controlsX and x <= controlsX + 1 then
-                self.orderAmount = math.max(1, self.orderAmount - 10)
-                return
-            end
-            controlsX = controlsX + 3
-
-            -- < button (decrease by 1)
-            if x >= controlsX and x <= controlsX then
-                self.orderAmount = math.max(1, self.orderAmount - 1)
-                return
-            end
-            controlsX = controlsX + 11  -- Skip amount display box
-
-            -- > button (increase by 1)
-            if x >= controlsX and x <= controlsX then
-                self.orderAmount = math.min(maxAmount, self.orderAmount + 1)
-                return
-            end
-            controlsX = controlsX + 2
-
-            -- >> button (increase by 10)
-            if x >= controlsX and x <= controlsX + 1 then
-                self.orderAmount = math.min(maxAmount, self.orderAmount + 10)
-                return
-            end
-            controlsX = controlsX + 3
-
-            -- >>> button (increase by stack size)
-            if x >= controlsX and x <= controlsX + 2 then
-                self.orderAmount = math.min(maxAmount, self.orderAmount + stackSize)
+            -- CRAFT tab
+            if x >= startX + 11 and x <= startX + 17 then
+                self.itemInfoTab = "CRAFT"
                 return
             end
         end
 
-        -- Location field click
-        local locationY = startY + 10
-        if y == locationY and x >= startX + 4 and x <= startX + modalWidth - 4 then
-            self.showLocationsModal = true
-            self.locationsPage = 1
-            return
-        end
+        -- Amount controls (ORDER tab)
+        if self.itemInfoTab == "ORDER" then
+            local controlsY = startY + 6
+            local controlsX = startX + 4
 
-        -- Cancel button
-        local buttonY = startY + modalHeight - 2
-        local cancelX = startX + 2
-        if y == buttonY and x >= cancelX and x <= cancelX + 7 then
-            self.showOrderModal = false
-            self.selectedItem = nil
-            return
-        end
+            local maxAmount = self.selectedItem and (self.selectedItem.value.count or 0) or 0
+            local stackSize = self.selectedItem and (self.selectedItem.value.stackSize or 64) or 64
 
-        -- Confirm button
-        local confirmX = startX + modalWidth - 12
-        if y == buttonY and x >= confirmX and x <= confirmX + 8 then
-            -- Submit order
-            self:submitOrder()
-            self.showOrderModal = false
-            self.selectedItem = nil
-            return
+            if y == controlsY then
+                -- <<< button (decrease by stack size)
+                if x >= controlsX and x <= controlsX + 2 then
+                    self.orderAmount = math.max(1, self.orderAmount - stackSize)
+                    return
+                end
+                controlsX = controlsX + 4
+
+                -- << button (decrease by 10)
+                if x >= controlsX and x <= controlsX + 1 then
+                    self.orderAmount = math.max(1, self.orderAmount - 10)
+                    return
+                end
+                controlsX = controlsX + 3
+
+                -- < button (decrease by 1)
+                if x >= controlsX and x <= controlsX then
+                    self.orderAmount = math.max(1, self.orderAmount - 1)
+                    return
+                end
+                controlsX = controlsX + 11  -- Skip amount display box
+
+                -- > button (increase by 1)
+                if x >= controlsX and x <= controlsX then
+                    self.orderAmount = math.min(maxAmount, self.orderAmount + 1)
+                    return
+                end
+                controlsX = controlsX + 2
+
+                -- >> button (increase by 10)
+                if x >= controlsX and x <= controlsX + 1 then
+                    self.orderAmount = math.min(maxAmount, self.orderAmount + 10)
+                    return
+                end
+                controlsX = controlsX + 3
+
+                -- >>> button (increase by stack size)
+                if x >= controlsX and x <= controlsX + 2 then
+                    self.orderAmount = math.min(maxAmount, self.orderAmount + stackSize)
+                    return
+                end
+            end
+
+            -- Location field click
+            local locationY = startY + 10
+            if y == locationY and x >= startX + 4 and x <= startX + modalWidth - 4 then
+                self.showLocationsModal = true
+                self.locationsPage = 1
+                return
+            end
+
+            -- Cancel button
+            local buttonY = startY + modalHeight - 2
+            local cancelX = startX + 2
+            if y == buttonY and x >= cancelX and x <= cancelX + 7 then
+                self.showOrderModal = false
+                self.selectedItem = nil
+                return
+            end
+
+            -- Confirm button
+            local confirmX = startX + modalWidth - 12
+            if y == buttonY and x >= confirmX and x <= confirmX + 8 then
+                -- Submit order
+                self:submitOrder()
+                self.showOrderModal = false
+                self.selectedItem = nil
+                return
+            end
+
+        elseif self.itemInfoTab == "CRAFT" then
+            -- CRAFT tab controls
+            local controlsY = startY + 6
+            local controlsX = startX + 4
+
+            -- Craft amount controls (triple arrow system)
+            if y == controlsY then
+                -- <<< button (decrease by 64)
+                if x >= controlsX and x <= controlsX + 2 then
+                    self.craftAmount = math.max(1, self.craftAmount - 64)
+                    return
+                end
+                controlsX = controlsX + 4
+
+                -- << button (decrease by 16)
+                if x >= controlsX and x <= controlsX + 1 then
+                    self.craftAmount = math.max(1, self.craftAmount - 16)
+                    return
+                end
+                controlsX = controlsX + 3
+
+                -- < button (decrease by 1)
+                if x >= controlsX and x <= controlsX then
+                    self.craftAmount = math.max(1, self.craftAmount - 1)
+                    return
+                end
+                controlsX = controlsX + 11  -- Skip amount display box
+
+                -- > button (increase by 1)
+                if x >= controlsX and x <= controlsX then
+                    self.craftAmount = self.craftAmount + 1
+                    return
+                end
+                controlsX = controlsX + 2
+
+                -- >> button (increase by 16)
+                if x >= controlsX and x <= controlsX + 1 then
+                    self.craftAmount = self.craftAmount + 16
+                    return
+                end
+                controlsX = controlsX + 3
+
+                -- >>> button (increase by 64)
+                if x >= controlsX and x <= controlsX + 2 then
+                    self.craftAmount = self.craftAmount + 64
+                    return
+                end
+            end
+
+            -- Autocraft checkbox click
+            local checkboxY = startY + 8
+            if y == checkboxY and x >= startX + 2 and x <= startX + 17 then
+                self.autocraft = not self.autocraft
+                return
+            end
+
+            -- Cancel button
+            local buttonY = startY + modalHeight - 2
+            local cancelX = startX + 2
+            if y == buttonY and x >= cancelX and x <= cancelX + 7 then
+                self.showOrderModal = false
+                self.selectedItem = nil
+                return
+            end
+
+            -- Craft button
+            local craftX = startX + modalWidth - 10
+            if y == buttonY and x >= craftX and x <= craftX + 6 then
+                -- Check if we can craft
+                local itemName = self.selectedItem.key:match("([^:]+)$") or self.selectedItem.key
+                local craftable = self:calculateCraftable(itemName, self.craftAmount)
+                local canCraft = craftable.canCraftAll or self.autocraft
+
+                if canCraft then
+                    -- Send craft request to turtle via rednet
+                    self:sendCraftRequest(self.selectedItem.key, self.craftAmount, self.autocraft)
+                    self.showOrderModal = false
+                    self.selectedItem = nil
+                end
+                return
+            end
         end
 
         -- Click outside closes modal
@@ -1995,6 +2311,30 @@ function MonitorService:submitOrder()
     else
         -- TODO: Implement remote withdrawal via rednet
         self.logger:warn("MonitorService", "Remote withdrawal not yet implemented")
+    end
+end
+
+function MonitorService:sendCraftRequest(itemName, amount, autocraft)
+    -- Find turtle computer ID (for now, broadcast to any turtle)
+    -- TODO: In production, should track registered turtle IDs
+    local message = {
+        action = "craft_request",
+        item_name = itemName,
+        amount = amount,
+        autocraft = autocraft
+    }
+
+    -- Broadcast craft request
+    if rednet.isOpen() then
+        rednet.broadcast(message)
+        self.logger:info("MonitorService", string.format(
+            "Sent craft request: %s x%d (autocraft: %s)",
+            itemName,
+            amount,
+            tostring(autocraft)
+        ))
+    else
+        self.logger:error("MonitorService", "Rednet not open, cannot send craft request")
     end
 end
 

@@ -1,9 +1,11 @@
-local NetPage = {}
+local BasePage = require("ui.pages.base_page")
+
+local NetPage = setmetatable({}, {__index = BasePage})
 NetPage.__index = NetPage
 
 function NetPage:new(context)
-    local o = setmetatable({}, self)
-    o.context = context
+    local o = BasePage.new(self, context, "net")
+
     o.eventBus = context.eventBus
     o.logger = context.logger
 
@@ -33,7 +35,7 @@ function NetPage:new(context)
     o.selectedConnection = nil -- Connection being viewed in details mode
     o.pingTimer = nil -- Timer for periodic pings
 
-    o.width, o.height = term.getSize()
+    -- Button regions
     o.backLink = {}
     o.addButton = {}
     o.enterButton = {}
@@ -41,6 +43,13 @@ function NetPage:new(context)
     o.requestButtons = {}
     o.cancelButton = {}
     o.confirmButton = {}
+    o.typeChangeButton = {}
+    o.typeButtons = {}
+    o.connectionRegions = {}
+
+    -- Custom header - don't use base page header
+    o.header:removeAll()
+    o.header.height = 0  -- Hide the header panel completely
 
     return o
 end
@@ -321,19 +330,53 @@ function NetPage:drawHeader()
     term.setCursorPos(1, 1)
     term.setBackgroundColor(colors.gray)
     term.clearLine()
-    term.setTextColor(colors.white)
-    term.setCursorPos(2, 1)
-    term.write("NETWORK CONNECTIONS")
 
-    term.setCursorPos(self.width - 10, 1)
-    term.setTextColor(colors.yellow)
-    term.write("ID: " .. self.computerId)
+    -- Store clickable regions
+    self.navButtons = self.navButtons or {}
 
-    term.setCursorPos(self.width - 6, 1)
-    term.setBackgroundColor(colors.red)
+    -- Navigation bar
+    local x = 2
+
+    -- Console button
+    term.setCursorPos(x, 1)
+    term.setBackgroundColor(colors.gray)
     term.setTextColor(colors.white)
-    term.write(" BACK ")
-    self.backLink = {y = 1, x1 = self.width - 6, x2 = self.width}
+    term.write("[Console]")
+    self.navButtons.console = {y = 1, x1 = x, x2 = x + 8}
+    x = x + 10
+
+    -- Net button (active)
+    term.setCursorPos(x, 1)
+    term.setBackgroundColor(colors.lightGray)
+    term.setTextColor(colors.black)
+    term.write("[Net]")
+    self.navButtons.net = {y = 1, x1 = x, x2 = x + 4}
+    x = x + 6
+
+    -- Stats button
+    term.setCursorPos(x, 1)
+    term.setBackgroundColor(colors.gray)
+    term.setTextColor(colors.cyan)
+    term.write("[Stats]")
+    self.navButtons.stats = {y = 1, x1 = x, x2 = x + 6}
+    x = x + 8
+
+    -- Tests button
+    term.setCursorPos(x, 1)
+    term.setBackgroundColor(colors.gray)
+    term.setTextColor(colors.lime)
+    term.write("[Tests]")
+    self.navButtons.tests = {y = 1, x1 = x, x2 = x + 6}
+    x = x + 8
+
+    -- Settings button
+    term.setCursorPos(x, 1)
+    term.setBackgroundColor(colors.gray)
+    term.setTextColor(colors.orange)
+    term.write("[Settings]")
+    self.navButtons.settings = {y = 1, x1 = x, x2 = x + 9}
+
+    term.setBackgroundColor(colors.black)
 end
 
 function NetPage:drawConnectionsList()
@@ -835,7 +878,20 @@ function NetPage:drawFooter()
 end
 
 function NetPage:handleInput(event, param1, param2, param3)
-    if event == "key" then
+    if event == "term_resize" then
+        self.width, self.height = term.getSize()
+
+        -- Rebuild UI components with new dimensions
+        self.root:setSize(self.width, self.height)
+        self.header:setSize(self.width, 1)
+        self.content:setSize(self.width, self.height - 2)
+        self.footer:setPosition(1, self.height)
+        self.footer:setSize(self.width, 1)
+
+        self:render()
+        return
+
+    elseif event == "key" then
         local key = param1
 
         if key == keys.escape then
@@ -938,8 +994,41 @@ function NetPage:handleInput(event, param1, param2, param3)
 end
 
 function NetPage:handleClick(x, y)
-    -- Back button in header
-    if y == self.backLink.y and x >= self.backLink.x1 and x <= self.backLink.x2 then
+    -- Check navigation button clicks
+    if self.navButtons then
+        if self.navButtons.console and y == self.navButtons.console.y and
+           x >= self.navButtons.console.x1 and x <= self.navButtons.console.x2 then
+            if self.context.router then
+                self.context.router:navigate("console")
+            end
+            return
+        elseif self.navButtons.net and y == self.navButtons.net.y and
+           x >= self.navButtons.net.x1 and x <= self.navButtons.net.x2 then
+            -- Already on net page, do nothing
+            return
+        elseif self.navButtons.stats and y == self.navButtons.stats.y and
+               x >= self.navButtons.stats.x1 and x <= self.navButtons.stats.x2 then
+            if self.context.router then
+                self.context.router:navigate("stats")
+            end
+            return
+        elseif self.navButtons.tests and y == self.navButtons.tests.y and
+               x >= self.navButtons.tests.x1 and x <= self.navButtons.tests.x2 then
+            if self.context.router then
+                self.context.router:navigate("tests")
+            end
+            return
+        elseif self.navButtons.settings and y == self.navButtons.settings.y and
+               x >= self.navButtons.settings.x1 and x <= self.navButtons.settings.x2 then
+            if self.context.router then
+                self.context.router:navigate("settings")
+            end
+            return
+        end
+    end
+
+    -- Back button in header (legacy - remove if not needed)
+    if self.backLink and y == self.backLink.y and x >= self.backLink.x1 and x <= self.backLink.x2 then
         if self.context.router then
             self.context.router:navigate("console")
         end

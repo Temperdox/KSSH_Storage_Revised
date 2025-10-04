@@ -6,6 +6,8 @@ local RecipeService = {}
 function RecipeService.new(bridge)
     local self = {
         bridge = bridge,
+        recipes = {},  -- In-memory recipe cache
+        recipePath = "/disk/recipes.json",  -- Disk storage path
         stats = {
             learned = 0,
             sent = 0,
@@ -20,40 +22,165 @@ end
 function RecipeService:init()
     print.info("[recipe] Initializing recipe service...")
 
-    -- Register command handler if needed
+    -- Load recipes from disk
+    self:loadRecipesFromDisk()
+
+    -- Register command handlers
     self.bridge:register("learn_recipe", function(sender, msg)
         return self:learnFromInventory(sender)
     end)
 
-    print.info("[recipe] Recipe service ready")
+    self.bridge:register("get_recipe", function(sender, msg)
+        return self:sendRecipeToComputer(sender, msg.item_name)
+    end)
+
+    print.info("[recipe] Recipe service ready -", self:getRecipeCount(), "recipes loaded")
 end
 
--- Map item IDs to tag categories
+-- Load all recipes from disk
+function RecipeService:loadRecipesFromDisk()
+    if not fs.exists(self.recipePath) then
+        print.debug("[recipe] No recipe file found at", self.recipePath)
+        self.recipes = {}
+        return
+    end
+
+    local file = fs.open(self.recipePath, "r")
+    local content = file.readAll()
+    file.close()
+
+    local loaded = textutils.unserialiseJSON(content)
+    if loaded and type(loaded) == "table" then
+        self.recipes = loaded
+        print.info("[recipe] Loaded", self:getRecipeCount(), "recipes from disk")
+    else
+        print.error("[recipe] Failed to parse recipe file")
+        self.recipes = {}
+    end
+end
+
+-- Save all recipes to disk
+function RecipeService:saveRecipesToDisk()
+    local dir = fs.getDir(self.recipePath)
+    if not fs.exists(dir) and dir ~= "" then
+        fs.makeDir(dir)
+    end
+
+    local file = fs.open(self.recipePath, "w")
+    file.write(textutils.serialiseJSON(self.recipes))
+    file.close()
+
+    print.debug("[recipe] Saved", self:getRecipeCount(), "recipes to disk")
+end
+
+-- Store a recipe
+function RecipeService:storeRecipe(recipeId, recipeData)
+    self.recipes[recipeId] = recipeData
+    self:saveRecipesToDisk()
+    print.info("[recipe] Stored recipe:", recipeId)
+end
+
+-- Get a recipe by item name
+function RecipeService:getRecipe(itemName)
+    return self.recipes[itemName]
+end
+
+-- Get count of stored recipes
+function RecipeService:getRecipeCount()
+    local count = 0
+    for _ in pairs(self.recipes) do
+        count = count + 1
+    end
+    return count
+end
+
+-- Send a specific recipe to computer
+function RecipeService:sendRecipeToComputer(sender, itemName)
+    local recipe = self:getRecipe(itemName)
+
+    if recipe then
+        self.bridge:send({
+            action = "recipe_data",
+            item_name = itemName,
+            recipe = recipe,
+            success = true
+        }, sender)
+        print.info("[recipe] Sent recipe for", itemName, "to computer", sender)
+    else
+        self.bridge:send({
+            action = "recipe_data",
+            item_name = itemName,
+            success = false,
+            error = "Recipe not found"
+        }, sender)
+        print.warn("[recipe] Recipe not found:", itemName)
+    end
+end
+
+-- Convert item ID to its tag equivalent for substitution
 function RecipeService:getItemTag(itemId)
     itemId = itemId:lower()
 
-    if itemId:match("_log$") or itemId:match("_stem$") then
-        return "tag:log"
-    elseif itemId:match("_planks$") then
-        return "tag:planks"
-    elseif itemId == "minecraft:coal" or itemId == "minecraft:charcoal" then
-        return "tag:coal"
-    elseif itemId:match("_slab$") and not itemId:match("stone") then
-        return "tag:wood_slabs"
-    elseif itemId:match("_stairs$") and not itemId:match("stone") then
-        return "tag:wood_stairs"
+    -- Handle mod tags with paths (c:ingots/iron → c:ingots, forge:ingots/iron → forge:ingots)
+    if itemId:match("^[%w_]+:[%w_]+/[%w_]+$") then
+        local namespace, path = itemId:match("^([%w_]+):([%w_]+)/[%w_]+$")
+        if namespace and path then
+            return namespace .. ":" .. path
+        end
     end
 
+    -- Handle minecraft namespace - convert to plural tags
+    if itemId:match("^minecraft:") then
+        local itemName = itemId:match("^minecraft:(.+)$")
+
+        -- Logs/stems → minecraft:logs
+        if itemName:match("_log$") or itemName:match("_stem$") then
+            return "minecraft:logs"
+        -- Planks → minecraft:planks
+        elseif itemName:match("_planks$") then
+            return "minecraft:planks"
+        -- Wool → minecraft:wool
+        elseif itemName:match("_wool$") then
+            return "minecraft:wool"
+        -- Slabs (wood) → minecraft:wooden_slabs
+        elseif itemName:match("_slab$") and not itemName:match("stone") then
+            return "minecraft:wooden_slabs"
+        -- Stairs (wood) → minecraft:wooden_stairs
+        elseif itemName:match("_stairs$") and not itemName:match("stone") then
+            return "minecraft:wooden_stairs"
+        -- Stone variants → minecraft:stone
+        elseif itemName:match("stone$") or itemName:match("cobblestone$") then
+            return "minecraft:stone"
+        -- Coal/charcoal → minecraft:coals
+        elseif itemName == "coal" or itemName == "charcoal" then
+            return "minecraft:coals"
+        -- Saplings → minecraft:saplings
+        elseif itemName:match("_sapling$") then
+            return "minecraft:saplings"
+        -- Leaves → minecraft:leaves
+        elseif itemName:match("_leaves$") then
+            return "minecraft:leaves"
+        -- Ingots → minecraft:ingots (if pattern exists)
+        elseif itemName:match("_ingot$") then
+            local metal = itemName:match("^(.+)_ingot$")
+            return "minecraft:" .. metal .. "_ingots"
+        end
+    end
+
+    -- No tag found
     return nil
 end
 
 -- Analyze the 3x3 grid to create pattern and key
-function RecipeService:analyzeGrid()
+-- Returns: recipe pattern, ingredient data (with symbols and item info)
+function RecipeService:analyzeGrid(substitutionPreferences)
     print.debug("[recipe] Analyzing crafting grid...")
+    substitutionPreferences = substitutionPreferences or {}
 
     local grid = {}
     local uniqueItems = {}
     local symbolMap = {}
+    local ingredientInfo = {}  -- Track original item names for UI
     local nextSymbol = 97  -- 'a' in ASCII
 
     -- Read the 3x3 grid (slots 1-9)
@@ -67,16 +194,26 @@ function RecipeService:analyzeGrid()
                 local symbol = string.char(nextSymbol)
                 symbolMap[itemKey] = symbol
 
-                -- Determine if this item should use a tag
+                -- Store ingredient info for UI display
                 local tag = self:getItemTag(item.name)
-                local useTag = tag ~= nil
-
-                uniqueItems[symbol] = {
-                    item = useTag and tag or item.name,
-                    wildcard = useTag
+                ingredientInfo[symbol] = {
+                    itemName = item.name,
+                    displayName = item.displayName or item.name,
+                    availableTag = tag,
+                    symbol = symbol
                 }
 
-                print.debug("[recipe] Symbol", symbol, "=", useTag and tag or item.name)
+                -- Check if user wants substitution for this ingredient
+                local useSubstitution = substitutionPreferences[symbol] or false
+                local finalItem = (useSubstitution and tag) and tag or item.name
+
+                uniqueItems[symbol] = {
+                    item = finalItem,
+                    wildcard = useSubstitution and tag ~= nil
+                }
+
+                print.debug("[recipe] Symbol", symbol, "=", finalItem,
+                           useSubstitution and "(substitution enabled)" or "")
                 nextSymbol = nextSymbol + 1
             end
 
@@ -102,7 +239,7 @@ function RecipeService:analyzeGrid()
     -- Add 'e' for empty to the key
     uniqueItems["e"] = { item = "none" }
 
-    return recipe, uniqueItems
+    return recipe, uniqueItems, ingredientInfo
 end
 
 -- Interactive recipe learning
@@ -133,17 +270,43 @@ function RecipeService:learnRecipe()
     print("\nEnter display name for this recipe:")
     local displayName = read()
 
-    print("Is this a wildcard recipe? (y/n):")
-    print("(outputs different items based on input)")
-    local wildcardInput = read()
-    local isWildcard = (wildcardInput:lower() == "y")
+    -- First pass: analyze grid to get ingredient info (without substitutions)
+    local _, _, ingredientInfo = self:analyzeGrid({})
 
-    -- Analyze the current grid
-    print.info("[recipe] Analyzing crafting grid...")
-    local recipe, key = self:analyzeGrid()
+    -- Ask about substitutions for each ingredient
+    print("\n=== Ingredient Substitutions ===")
+    print("Allow substitutions for each ingredient?")
+    print("(e.g., any log instead of oak log)")
+    print("")
 
-    -- Display the pattern
-    print("\nDetected pattern:")
+    local substitutionPrefs = {}
+    for symbol, info in pairs(ingredientInfo) do
+        print(string.format("[%s] %s", symbol, info.displayName))
+
+        if info.availableTag then
+            print(string.format("    Can substitute with: %s", info.availableTag))
+            print("    Allow substitutions? (y/n):")
+            local response = read()
+            substitutionPrefs[symbol] = (response:lower() == "y")
+
+            if substitutionPrefs[symbol] then
+                print(string.format("    -> Will use: %s", info.availableTag))
+            else
+                print(string.format("    -> Will use: %s (exact)", info.itemName))
+            end
+        else
+            print("    (No substitution tag available)")
+            substitutionPrefs[symbol] = false
+        end
+        print("")
+    end
+
+    -- Second pass: analyze grid with substitution preferences
+    print.info("[recipe] Building recipe with substitution preferences...")
+    local recipe, key = self:analyzeGrid(substitutionPrefs)
+
+    -- Display the final pattern
+    print("\nFinal recipe pattern:")
     for i, row in ipairs(recipe) do
         print("  " .. row)
     end
@@ -154,7 +317,7 @@ function RecipeService:learnRecipe()
             print(string.format("  %s = %s%s",
                     symbol,
                     data.item,
-                    data.wildcard and " (wildcard)" or ""))
+                    data.wildcard and " (substitution)" or " (exact)"))
         end
     end
 
@@ -178,14 +341,20 @@ function RecipeService:learnRecipe()
 
     print.info("[recipe] Crafted:", result.displayName or result.name, "x" .. result.count)
 
-    -- Determine result tag
-    local resultTag = nil
-    local resultWildcard = false
+    -- Ask if result should use wildcards
+    print("\nAllow result substitution? (y/n):")
+    print("(For recipes that output different items based on input)")
+    local resultSubInput = read()
+    local resultWildcard = (resultSubInput:lower() == "y")
 
-    if isWildcard then
+    local resultTag = nil
+    if resultWildcard then
         resultTag = self:getItemTag(result.name)
         if resultTag then
-            resultWildcard = true
+            print(string.format("Result will use tag: %s", resultTag))
+        else
+            print("No tag available for result, using exact item")
+            resultWildcard = false
         end
     end
 
@@ -193,11 +362,11 @@ function RecipeService:learnRecipe()
     local recipeId = result.name
     local recipeData = {
         display = displayName,
-        wildcard = isWildcard,
+        wildcard = resultWildcard,
         key = key,
         recipe = recipe,
         result = {
-            item = resultWildcard and resultTag or result.name,
+            item = (resultWildcard and resultTag) and resultTag or result.name,
             count = result.count,
             wildcard = resultWildcard
         }
@@ -205,9 +374,14 @@ function RecipeService:learnRecipe()
 
     self.stats.learned = self.stats.learned + 1
 
+    -- Store locally first
+    self:storeRecipe(recipeId, recipeData)
+
     -- Send to computer
     print.info("[recipe] Sending recipe to storage system...")
     self:sendRecipe(recipeId, recipeData)
+
+    print("\n=== Recipe Saved Successfully! ===")
 
     -- Clear inventory option
     print("\nDrop crafted items? (y/n):")
@@ -243,10 +417,12 @@ function RecipeService:sendRecipe(recipeId, recipeData)
 end
 
 -- Learn from current inventory (called via bridge)
+-- Remote learning uses no substitutions by default (exact recipes)
 function RecipeService:learnFromInventory(sender)
     print.info("[recipe] Remote recipe learning request from", sender)
 
-    local recipe, key = self:analyzeGrid()
+    -- No substitutions for remote learning (use exact items)
+    local recipe, key = self:analyzeGrid({})
 
     -- Try to craft to determine output
     local success, error = turtle.craft()
@@ -270,10 +446,10 @@ function RecipeService:learnFromInventory(sender)
         return
     end
 
-    -- Build recipe data
+    -- Build recipe data (exact recipe, no wildcards)
     local recipeData = {
         display = result.displayName or result.name,
-        wildcard = false,  -- Default to non-wildcard
+        wildcard = false,
         key = key,
         recipe = recipe,
         result = {
@@ -282,6 +458,9 @@ function RecipeService:learnFromInventory(sender)
             wildcard = false
         }
     }
+
+    -- Store locally
+    self:storeRecipe(result.name, recipeData)
 
     -- Send back to requester
     self.bridge:send({
