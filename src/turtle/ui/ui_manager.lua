@@ -303,9 +303,23 @@ end
 
 function UIManager:addConsoleMessage(message)
     local time = os.date("%H:%M:%S")
-    local fullMessage = "[" .. time .. "] " .. tostring(message)
+    local msgStr = tostring(message)
+
+    -- Truncate very long messages to prevent UI overflow
+    local maxMsgLength = self.width - 15  -- Leave room for timestamp
+    if #msgStr > maxMsgLength then
+        msgStr = msgStr:sub(1, maxMsgLength - 3) .. "..."
+    end
+
+    local fullMessage = "[" .. time .. "] " .. msgStr
     table.insert(self.consoleLines, fullMessage)
-    while #self.consoleLines > self.maxConsoleLines do table.remove(self.consoleLines, 1) end
+
+    -- Keep console history limited
+    while #self.consoleLines > self.maxConsoleLines do
+        table.remove(self.consoleLines, 1)
+    end
+
+    -- Auto-scroll to bottom
     local consoleHeight = self.height - 8
     if #self.consoleLines > consoleHeight then
         self.consoleScroll = #self.consoleLines - consoleHeight + 1

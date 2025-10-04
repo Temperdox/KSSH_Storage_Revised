@@ -319,13 +319,22 @@ function MonitorService:updateConnectedLocations()
 end
 
 function MonitorService:openRednet()
-    -- Find and open modem for rednet
-    local modem = peripheral.find("modem")
-    if modem and not rednet.isOpen() then
-        rednet.open(peripheral.getName(modem))
-        self.logger:info("MonitorService", "Rednet opened on " .. peripheral.getName(modem))
-    elseif not modem then
-        self.logger:warn("MonitorService", "No modem found for rednet pairing")
+    -- Find and open WIRELESS modem for rednet (wired modems don't work for rednet)
+    local modem = peripheral.find("modem", function(name, wrapped)
+        return wrapped.isWireless()
+    end)
+
+    if modem then
+        local modemName = peripheral.getName(modem)
+        if not rednet.isOpen(modemName) then
+            rednet.open(modemName)
+            self.logger:info("MonitorService", "Rednet opened on wireless modem: " .. modemName)
+        else
+            self.logger:info("MonitorService", "Rednet already open on: " .. modemName)
+        end
+    else
+        self.logger:error("MonitorService", "No WIRELESS modem found! Turtle communication requires a wireless modem.")
+        self.logger:error("MonitorService", "Please attach a wireless modem to communicate with turtles.")
     end
 end
 
@@ -2400,21 +2409,32 @@ function MonitorService:sendCraftRequest(itemName, amount, autocraft)
 end
 
 function MonitorService:requestRecipeMode(itemName)
+    self.logger:info("MonitorService", "requestRecipeMode called for: " .. tostring(itemName))
+
     -- Send request to turtle to enter recipe save mode
     local message = {
         action = "enter_recipe_mode",
         item_name = itemName
     }
 
-    -- Broadcast recipe mode request
-    if rednet.isOpen() then
+    -- Check if any rednet modem is open
+    local openSides = {}
+    for _, side in ipairs({"left", "right", "top", "bottom", "front", "back"}) do
+        if rednet.isOpen(side) then
+            table.insert(openSides, side)
+        end
+    end
+
+    if #openSides > 0 then
         rednet.broadcast(message)
         self.logger:info("MonitorService", string.format(
-            "Sent recipe mode request for: %s",
-            itemName
+            "Broadcasting recipe mode request for '%s' on sides: %s",
+            itemName,
+            table.concat(openSides, ", ")
         ))
     else
-        self.logger:error("MonitorService", "Rednet not open, cannot send recipe mode request")
+        self.logger:error("MonitorService", "No rednet modems open! Cannot send recipe mode request.")
+        self.logger:error("MonitorService", "Make sure a wireless modem is attached and rednet is open.")
     end
 end
 

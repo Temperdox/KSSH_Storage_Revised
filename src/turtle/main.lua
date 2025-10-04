@@ -55,8 +55,15 @@ recipes:init()
 -- Register handler for recipe mode request from computer
 bridge:register("enter_recipe_mode", function(sender, msg)
     log("[bridge] Computer requested recipe mode for:", msg.item_name or "unknown")
+    log("[bridge] Sender ID:", sender)
+    log("[bridge] UI available:", tostring(ui ~= nil))
+    log("[bridge] enterRecipeMode available:", tostring(ui and ui.enterRecipeMode ~= nil))
+
     if ui and ui.enterRecipeMode then
         ui:enterRecipeMode(msg.item_name)
+        log("[bridge] Recipe mode activated")
+    else
+        log("[bridge] ERROR: Cannot enter recipe mode - UI not available")
     end
 end)
 
