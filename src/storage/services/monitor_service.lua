@@ -1150,6 +1150,55 @@ function MonitorService:drawOrderTab(contentX, contentY, modalWidth, startX, sta
 end
 
 function MonitorService:drawCraftTab(contentX, contentY, modalWidth, startX, startY, modalHeight, maxAmount, itemName)
+    -- Check if recipe exists
+    local recipes = self:loadRecipes()
+    local fullItemName = nil
+    for _, item in ipairs(self.itemCache) do
+        local shortName = item.key:match("([^:]+)$")
+        if shortName == itemName then
+            fullItemName = item.key
+            break
+        end
+    end
+
+    local hasRecipe = fullItemName and recipes[fullItemName] ~= nil
+
+    if not hasRecipe then
+        -- NO RECIPE - Show "Add Recipe" button
+        self.frameBuffer:writeText(contentX, contentY, "No recipe found for this item", colors.orange, colors.gray)
+        contentY = contentY + 2
+
+        self.frameBuffer:writeText(contentX, contentY, "To enable crafting, a recipe must", colors.lightGray, colors.gray)
+        contentY = contentY + 1
+        self.frameBuffer:writeText(contentX, contentY, "be added to the crafting turtle.", colors.lightGray, colors.gray)
+        contentY = contentY + 2
+
+        -- Add Recipe button (centered)
+        local addRecipeBtn = "[Add Recipe]"
+        local btnX = contentX + math.floor((modalWidth - 4 - #addRecipeBtn) / 2)
+        local btnY = contentY
+        self.frameBuffer:writeText(btnX, btnY, addRecipeBtn, colors.lime, colors.gray)
+        contentY = contentY + 3
+
+        -- Store button position for click detection
+        self.addRecipeButton = {
+            x = btnX,
+            y = btnY,
+            width = #addRecipeBtn,
+            itemName = fullItemName or itemName
+        }
+
+        -- Cancel button at bottom
+        local buttonY = startY + modalHeight - 2
+        local cancelX = startX + 2
+        self.frameBuffer:writeText(cancelX, buttonY, "[Cancel]", colors.lightGray, colors.gray)
+
+        return
+    end
+
+    -- RECIPE EXISTS - Show normal craft controls
+    self.addRecipeButton = nil  -- Clear the add recipe button
+
     -- Amount field
     self.frameBuffer:writeText(contentX, contentY, "Craft Amount:", colors.white, colors.gray)
     contentY = contentY + 1
@@ -1927,7 +1976,19 @@ function MonitorService:handleClick(x, y)
             end
 
         elseif self.itemInfoTab == "CRAFT" then
-            -- CRAFT tab controls
+            -- Check for Add Recipe button click (shown when no recipe exists)
+            if self.addRecipeButton then
+                local btn = self.addRecipeButton
+                if y == btn.y and x >= btn.x and x <= btn.x + btn.width - 1 then
+                    -- Send request to turtle to enter recipe mode
+                    self:requestRecipeMode(btn.itemName)
+                    self.showOrderModal = false
+                    self.selectedItem = nil
+                    return
+                end
+            end
+
+            -- CRAFT tab controls (only shown when recipe exists)
             local controlsY = startY + 6
             local controlsX = startX + 4
 
@@ -2335,6 +2396,25 @@ function MonitorService:sendCraftRequest(itemName, amount, autocraft)
         ))
     else
         self.logger:error("MonitorService", "Rednet not open, cannot send craft request")
+    end
+end
+
+function MonitorService:requestRecipeMode(itemName)
+    -- Send request to turtle to enter recipe save mode
+    local message = {
+        action = "enter_recipe_mode",
+        item_name = itemName
+    }
+
+    -- Broadcast recipe mode request
+    if rednet.isOpen() then
+        rednet.broadcast(message)
+        self.logger:info("MonitorService", string.format(
+            "Sent recipe mode request for: %s",
+            itemName
+        ))
+    else
+        self.logger:error("MonitorService", "Rednet not open, cannot send recipe mode request")
     end
 end
 

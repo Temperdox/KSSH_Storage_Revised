@@ -52,6 +52,14 @@ local recipes = RecipeService.new(bridge)
 crafter:init()
 recipes:init()
 
+-- Register handler for recipe mode request from computer
+bridge:register("enter_recipe_mode", function(sender, msg)
+    log("[bridge] Computer requested recipe mode for:", msg.item_name or "unknown")
+    if ui and ui.enterRecipeMode then
+        ui:enterRecipeMode(msg.item_name)
+    end
+end)
+
 -- Now initialize UI with all dependencies
 log("Initializing UI...")
 ui:init(executor, bridge, {

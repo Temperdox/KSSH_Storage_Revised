@@ -136,35 +136,75 @@ function RecipeService:getItemTag(itemId)
         -- Logs/stems → minecraft:logs
         if itemName:match("_log$") or itemName:match("_stem$") then
             return "minecraft:logs"
-        -- Planks → minecraft:planks
+
+        -- Planks → minecraft:planks (plural)
         elseif itemName:match("_planks$") then
             return "minecraft:planks"
-        -- Wool → minecraft:wool
+
+        -- Wool → minecraft:wool (already plural)
         elseif itemName:match("_wool$") then
             return "minecraft:wool"
-        -- Slabs (wood) → minecraft:wooden_slabs
+
+        -- Slabs (wood) → minecraft:wooden_slabs (plural)
         elseif itemName:match("_slab$") and not itemName:match("stone") then
             return "minecraft:wooden_slabs"
-        -- Stairs (wood) → minecraft:wooden_stairs
+
+        -- Stairs (wood) → minecraft:wooden_stairs (plural)
         elseif itemName:match("_stairs$") and not itemName:match("stone") then
             return "minecraft:wooden_stairs"
+
         -- Stone variants → minecraft:stone
         elseif itemName:match("stone$") or itemName:match("cobblestone$") then
             return "minecraft:stone"
-        -- Coal/charcoal → minecraft:coals
+
+        -- Coal/charcoal → minecraft:coals (plural)
         elseif itemName == "coal" or itemName == "charcoal" then
             return "minecraft:coals"
-        -- Saplings → minecraft:saplings
+
+        -- Saplings → minecraft:saplings (plural)
         elseif itemName:match("_sapling$") then
             return "minecraft:saplings"
-        -- Leaves → minecraft:leaves
+
+        -- Leaves → minecraft:leaves (plural)
         elseif itemName:match("_leaves$") then
             return "minecraft:leaves"
-        -- Ingots → minecraft:ingots (if pattern exists)
+
+        -- Ingots → c:ingots or forge:ingots (use common tags for cross-mod support)
+        -- Prefer c: (Common) tag for better mod compatibility
         elseif itemName:match("_ingot$") then
             local metal = itemName:match("^(.+)_ingot$")
-            return "minecraft:" .. metal .. "_ingots"
+            -- Use c: tag for ingots (standard in many mods)
+            return "c:" .. metal .. "_ingots"
+
+        -- Nuggets → c:nuggets
+        elseif itemName:match("_nugget$") then
+            local metal = itemName:match("^(.+)_nugget$")
+            return "c:" .. metal .. "_nuggets"
+
+        -- Gems → c:gems
+        elseif itemName:match("diamond") or itemName:match("emerald") or itemName:match("amethyst") then
+            local gem = itemName:match("^(.+)$")
+            return "c:" .. gem .. "s"
+
+        -- Ores → c:ores
+        elseif itemName:match("_ore$") then
+            local ore = itemName:match("^(.+)_ore$")
+            return "c:" .. ore .. "_ores"
+
+        -- Dusts/powders → c:dusts
+        elseif itemName:match("_dust$") or itemName:match("powder$") then
+            local material = itemName:match("^(.+)_dust$") or itemName:match("^(.+)_powder$")
+            return "c:dusts"
         end
+    end
+
+    -- Handle forge/c tags directly (already modded items)
+    if itemId:match("^forge:") or itemId:match("^c:") then
+        -- Already a tag, make it plural if not already
+        if not itemId:match("s$") then
+            return itemId .. "s"
+        end
+        return itemId
     end
 
     -- No tag found

@@ -39,7 +39,9 @@ function UIManager.new()
         },
         executor = nil,
         bridge = nil,
-        services = {}
+        services = {},
+        recipeUI = nil,  -- Recipe save mode UI
+        recipeUIActive = false
     }
 
     setmetatable(self, {__index = UIManager})
@@ -54,6 +56,12 @@ function UIManager:init(executor, bridge, services)
     -- Get terminal size
     self.width, self.height = self.term.getSize()
 
+    -- Initialize recipe UI
+    if services.recipes then
+        local RecipeUI = require("ui.recipe_ui")
+        self.recipeUI = RecipeUI.new(services.recipes)
+    end
+
     -- Initialize buttons
     self:initButtons()
 
@@ -67,7 +75,11 @@ function UIManager:init(executor, bridge, services)
     if self.executor then
         self.executor:submitRecurring(function()
             self:updateStatus()
-            self:draw()
+            if not self.recipeUIActive then
+                self:draw()
+            elseif self.recipeUI and self.recipeUI.active then
+                self.recipeUI:draw()
+            end
         end, 1, "ui_update", 3)
     end
 
@@ -327,30 +339,30 @@ function UIManager:updateStatus()
 end
 
 function UIManager:onStoreRecipe()
-    self:addConsoleMessage("Starting recipe learning...")
-    local hasItems = false
-    for slot = 1, 9 do
-        if turtle.getItemDetail(slot) then hasItems = true; break end
-    end
-    if not hasItems then
-        self:addConsoleMessage("[WARN] No items in crafting grid (slots 1-9)")
+    if not self.recipeUI then
+        self:addConsoleMessage("[ERROR] Recipe UI not available")
         return
     end
 
-    if self.executor and self.services.recipes then
-        self.executor:submit(function()
-            local ok, result = pcall(function()
-                return self:learnRecipeUI()
-            end)
-            if ok and result then
-                self:addConsoleMessage("[INFO] Recipe learned successfully!")
-            else
-                self:addConsoleMessage("[ERROR] Recipe learning failed: " .. tostring(result))
-            end
-        end, "ui_learn_recipe", 8)
-    else
-        self:addConsoleMessage("[ERROR] Recipe service not available")
+    self:enterRecipeMode()
+end
+
+function UIManager:enterRecipeMode(itemName)
+    if not self.recipeUI then
+        self:addConsoleMessage("[ERROR] Recipe UI not available")
+        return
     end
+
+    self.recipeUIActive = true
+    self.recipeUI:enter(itemName)
+end
+
+function UIManager:exitRecipeMode()
+    self.recipeUIActive = false
+    if self.recipeUI then
+        self.recipeUI:exit()
+    end
+    self:draw()
 end
 
 function UIManager:learnRecipeUI()
@@ -379,6 +391,18 @@ function UIManager:showStatus()
 end
 
 function UIManager:handleTouch(x, y)
+    -- If recipe UI is active, delegate to it
+    if self.recipeUIActive and self.recipeUI then
+        local handled = self.recipeUI:handleTouch(x, y)
+
+        -- Check if recipe UI was exited
+        if not self.recipeUI.active then
+            self:exitRecipeMode()
+        end
+
+        return handled
+    end
+
     for _, button in pairs(self.buttons) do
         if button.active and
                 x >= button.x and x < button.x + button.width and
