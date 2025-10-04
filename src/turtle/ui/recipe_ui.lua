@@ -93,9 +93,10 @@ function RecipeUI:drawGrid(x, y)
     term.setTextColor(colors.cyan)
     term.write("Grid:")
 
-    -- Draw grid (skip slots 4 and 5)
+    -- Draw grid
+    -- Turtle crafting slots: 1,2,3 (row 1), 5,6,7 (row 2), 9,10,11 (row 3)
     y = y + 1
-    local slotMap = {1, 2, 3, 6, 7, 8, 11, 12, 13}  -- Actual turtle slots for crafting
+    local slotMap = {1, 2, 3, 5, 6, 7, 9, 10, 11}
     local gridIdx = 1
 
     for row = 0, 2 do
@@ -292,8 +293,9 @@ function RecipeUI:updateGridFromInventory()
     local symbolMap = {}
     local nextSymbol = string.byte('A')  -- Start with 'A'
 
-    -- Crafting grid slots (skipping fuel slots 4, 5, 9, 10, 14, 15, 16)
-    local craftingSlots = {1, 2, 3, 6, 7, 8, 11, 12, 13}
+    -- Turtle crafting slots: 1,2,3 (row 1), 5,6,7 (row 2), 9,10,11 (row 3)
+    -- Skip slots 4, 8, 12
+    local craftingSlots = {1, 2, 3, 5, 6, 7, 9, 10, 11}
 
     for _, slot in ipairs(craftingSlots) do
         local item = turtle.getItemDetail(slot)
@@ -369,7 +371,7 @@ end
 -- Craft and prepare to save
 function RecipeUI:craftAndSave()
     -- Check if grid has items (check crafting slots only)
-    local craftingSlots = {1, 2, 3, 6, 7, 8, 11, 12, 13}
+    local craftingSlots = {1, 2, 3, 5, 6, 7, 9, 10, 11}
     local hasItems = false
     for _, slot in ipairs(craftingSlots) do
         if turtle.getItemDetail(slot) then

@@ -223,8 +223,9 @@ function RecipeService:analyzeGrid(substitutionPreferences)
     local ingredientInfo = {}  -- Track original item names for UI
     local nextSymbol = 97  -- 'a' in ASCII
 
-    -- Read the 3x3 grid (turtle crafting slots: 1,2,3,6,7,8,11,12,13)
-    local craftingSlots = {1, 2, 3, 6, 7, 8, 11, 12, 13}
+    -- Read the 3x3 grid (turtle crafting slots: 1,2,3,5,6,7,9,10,11)
+    -- Skip slots 4, 8, 12
+    local craftingSlots = {1, 2, 3, 5, 6, 7, 9, 10, 11}
     local gridPos = 1
 
     for _, slot in ipairs(craftingSlots) do
@@ -293,12 +294,12 @@ function RecipeService:learnRecipe()
 
     print("=== Recipe Learning Mode ===")
     print("Place ingredients in crafting grid")
-    print("(slots 1,2,3,6,7,8,11,12,13)")
+    print("(slots 1,2,3,5,6,7,9,10,11)")
     print("Current grid contents:")
 
     -- Show what's in the grid
     local hasItems = false
-    local craftingSlots = {1, 2, 3, 6, 7, 8, 11, 12, 13}
+    local craftingSlots = {1, 2, 3, 5, 6, 7, 9, 10, 11}
     local gridPos = 1
 
     for _, slot in ipairs(craftingSlots) do

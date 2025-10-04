@@ -59,8 +59,9 @@ local function analyzeGrid()
     local symbolMap = {}
     local nextSymbol = 97 -- 'a' in ASCII
 
-    -- Read the 3x3 grid (turtle crafting slots: 1,2,3,6,7,8,11,12,13)
-    local craftingSlots = {1, 2, 3, 6, 7, 8, 11, 12, 13}
+    -- Read the 3x3 grid (turtle crafting slots: 1,2,3,5,6,7,9,10,11)
+    -- Skip slots 4, 8, 12
+    local craftingSlots = {1, 2, 3, 5, 6, 7, 9, 10, 11}
     local gridPos = 1
 
     for _, slot in ipairs(craftingSlots) do
@@ -114,11 +115,11 @@ end
 -- Get user input for recipe metadata
 local function getRecipeInfo()
     print("=== Recipe Learning Mode ===")
-    print("Place items in crafting grid (slots 1,2,3,6,7,8,11,12,13)")
+    print("Place items in crafting grid (slots 1,2,3,5,6,7,9,10,11)")
     print("Current grid contents:")
 
     -- Show what's in the grid
-    local craftingSlots = {1, 2, 3, 6, 7, 8, 11, 12, 13}
+    local craftingSlots = {1, 2, 3, 5, 6, 7, 9, 10, 11}
     local gridPos = 1
 
     for _, slot in ipairs(craftingSlots) do
