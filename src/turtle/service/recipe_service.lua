@@ -223,8 +223,11 @@ function RecipeService:analyzeGrid(substitutionPreferences)
     local ingredientInfo = {}  -- Track original item names for UI
     local nextSymbol = 97  -- 'a' in ASCII
 
-    -- Read the 3x3 grid (slots 1-9)
-    for slot = 1, 9 do
+    -- Read the 3x3 grid (turtle crafting slots: 1,2,3,6,7,8,11,12,13)
+    local craftingSlots = {1, 2, 3, 6, 7, 8, 11, 12, 13}
+    local gridPos = 1
+
+    for _, slot in ipairs(craftingSlots) do
         local item = turtle.getItemDetail(slot)
         if item then
             local itemKey = item.name .. "@" .. (item.nbt or "")
@@ -257,10 +260,12 @@ function RecipeService:analyzeGrid(substitutionPreferences)
                 nextSymbol = nextSymbol + 1
             end
 
-            grid[slot] = symbolMap[itemKey]
+            grid[gridPos] = symbolMap[itemKey]
         else
-            grid[slot] = "e"  -- empty
+            grid[gridPos] = "e"  -- empty
         end
+
+        gridPos = gridPos + 1
     end
 
     -- Convert grid to recipe pattern (3 strings)
@@ -268,8 +273,8 @@ function RecipeService:analyzeGrid(substitutionPreferences)
     for row = 0, 2 do
         local rowStr = ""
         for col = 1, 3 do
-            local slot = row * 3 + col
-            rowStr = rowStr .. grid[slot]
+            local pos = row * 3 + col
+            rowStr = rowStr .. (grid[pos] or "e")
             if col < 3 then rowStr = rowStr .. " " end
         end
         table.insert(recipe, rowStr)
@@ -287,19 +292,24 @@ function RecipeService:learnRecipe()
     print.info("[recipe] Starting interactive recipe learning...")
 
     print("=== Recipe Learning Mode ===")
-    print("Place ingredients in slots 1-9 (3x3 grid)")
+    print("Place ingredients in crafting grid")
+    print("(slots 1,2,3,6,7,8,11,12,13)")
     print("Current grid contents:")
 
     -- Show what's in the grid
     local hasItems = false
-    for slot = 1, 9 do
+    local craftingSlots = {1, 2, 3, 6, 7, 8, 11, 12, 13}
+    local gridPos = 1
+
+    for _, slot in ipairs(craftingSlots) do
         local item = turtle.getItemDetail(slot)
         if item then
-            local row = math.floor((slot - 1) / 3) + 1
-            local col = ((slot - 1) % 3) + 1
+            local row = math.floor((gridPos - 1) / 3) + 1
+            local col = ((gridPos - 1) % 3) + 1
             print(string.format("  [%d,%d]: %s x%d", row, col, item.displayName or item.name, item.count))
             hasItems = true
         end
+        gridPos = gridPos + 1
     end
 
     if not hasItems then

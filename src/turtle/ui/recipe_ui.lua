@@ -54,34 +54,30 @@ function RecipeUI:draw()
     term.setCursorPos(math.floor((w - #title) / 2), 1)
     term.write(title)
 
-    -- Instructions
     term.setBackgroundColor(colors.black)
-    term.setCursorPos(1, 3)
-    term.setTextColor(colors.lightGray)
-    term.write("Place items in slots 1-9")
 
-    -- Draw 3x3 grid
-    self:drawGrid(3, 5)
+    -- Draw 3x3 grid (top left)
+    self:drawGrid(2, 3)
 
-    -- Draw legend
-    self:drawLegend(3, 12)
+    -- Draw legend (top right)
+    self:drawLegend(w - 22, 3)
 
-    -- Draw result if crafted
+    -- Draw result if crafted (center right of grid)
     if self.result then
-        self:drawResult(w - 15, 7)
+        self:drawResult(18, 6)
     end
 
-    -- Draw substitution checkbox
-    self:drawSubstitutionToggle(3, h - 5)
+    -- Draw substitution checkbox (bottom area)
+    self:drawSubstitutionToggle(2, h - 4)
 
-    -- Draw buttons
+    -- Draw buttons (bottom)
     if not self.awaitingConfirmation then
-        self:drawButton("Craft & Save", 3, h - 2, colors.green)
-        self:drawButton("Cancel", w - 10, h - 2, colors.red)
+        self:drawButton("Craft & Save", 2, h - 1, colors.green)
+        self:drawButton("Cancel", w - 9, h - 1, colors.red)
     else
         -- Confirmation buttons
-        self:drawButton("Confirm", 3, h - 2, colors.green)
-        self:drawButton("Discard", w - 11, h - 2, colors.red)
+        self:drawButton("Confirm", 2, h - 1, colors.green)
+        self:drawButton("Discard", w - 10, h - 1, colors.red)
     end
 
     term.setBackgroundColor(colors.black)
@@ -95,17 +91,21 @@ function RecipeUI:drawGrid(x, y)
     -- Grid header
     term.setCursorPos(x, y)
     term.setTextColor(colors.cyan)
-    term.write("Crafting Grid:")
+    term.write("Grid:")
 
-    -- Draw grid
+    -- Draw grid (skip slots 4 and 5)
     y = y + 1
+    local slotMap = {1, 2, 3, 6, 7, 8, 11, 12, 13}  -- Actual turtle slots for crafting
+    local gridIdx = 1
+
     for row = 0, 2 do
         term.setCursorPos(x, y + row)
         term.setTextColor(colors.white)
 
         for col = 0, 2 do
-            local slot = row * 3 + col + 1
+            local slot = slotMap[gridIdx]
             local symbol = self.gridSymbols[slot] or " "
+            gridIdx = gridIdx + 1
 
             -- Draw cell
             term.setBackgroundColor(colors.gray)
@@ -127,7 +127,7 @@ end
 function RecipeUI:drawLegend(x, y)
     term.setCursorPos(x, y)
     term.setTextColor(colors.cyan)
-    term.write("Item Legend:")
+    term.write("Legend:")
 
     y = y + 1
 
@@ -154,23 +154,85 @@ function RecipeUI:drawLegend(x, y)
         term.setTextColor(colors.yellow)
         term.write("[" .. symbol .. "]")
         term.setTextColor(colors.white)
-        term.write(" = ")
+        term.write(" ")
         term.setTextColor(colors.lightGray)
 
-        -- Show substitution tag or exact item
+        -- Show shortened name
         local displayItem = info.item
         if self.enableSubstitutions and info.availableTag then
-            displayItem = info.availableTag
+            displayItem = self:shortenTagName(info.availableTag)
             term.setTextColor(colors.lime)
-        end
-
-        -- Truncate if too long
-        if #displayItem > 20 then
-            displayItem = displayItem:sub(1, 17) .. "..."
+        else
+            displayItem = self:shortenTagName(info.itemName)
         end
 
         term.write(displayItem)
     end
+end
+
+-- Shorten tag names to just the material/type
+function RecipeUI:shortenTagName(itemId)
+    -- Extract just the material name from tags
+    -- minecraft:oak_planks -> oak
+    -- minecraft:planks -> planks
+    -- c:iron_ingots -> iron
+    -- minecraft:logs -> logs
+
+    if not itemId then return "unknown" end
+
+    itemId = itemId:lower()
+
+    -- Handle c: or forge: tags
+    if itemId:match("^c:") or itemId:match("^forge:") then
+        local material = itemId:match("^[^:]+:(.+)$")
+        if material then
+            -- Remove _ingots, _nuggets, _ores, etc.
+            material = material:gsub("_ingots$", "")
+            material = material:gsub("_nuggets$", "")
+            material = material:gsub("_ores$", "")
+            material = material:gsub("_dusts$", "")
+            return material
+        end
+    end
+
+    -- Handle minecraft: tags
+    if itemId:match("^minecraft:") then
+        local item = itemId:match("^minecraft:(.+)$")
+        if item then
+            -- If it's a plural tag (planks, logs), just return it
+            if item == "planks" or item == "logs" or item == "wool" or
+               item == "wooden_slabs" or item == "wooden_stairs" or
+               item == "saplings" or item == "leaves" or item == "coals" then
+                return item
+            end
+
+            -- Otherwise extract the wood type or material
+            -- oak_planks -> oak
+            -- birch_log -> birch
+            local material = item:match("^(.+)_planks$") or
+                           item:match("^(.+)_log$") or
+                           item:match("^(.+)_wood$") or
+                           item:match("^(.+)_ingot$") or
+                           item:match("^(.+)_nugget$")
+
+            if material then
+                return material
+            end
+
+            -- Return shortened version if no pattern matches
+            if #item > 12 then
+                return item:sub(1, 9) .. "..."
+            end
+            return item
+        end
+    end
+
+    -- Fallback: just return last part after :
+    local shortName = itemId:match("([^:]+)$") or itemId
+    if #shortName > 12 then
+        return shortName:sub(1, 9) .. "..."
+    end
+    return shortName
 end
 
 -- Draw result
@@ -210,7 +272,7 @@ function RecipeUI:drawSubstitutionToggle(x, y)
     term.write("] ")
 
     term.setTextColor(colors.lightGray)
-    term.write("Enable Substitutions")
+    term.write("Substitutions")
 end
 
 -- Draw button
@@ -230,7 +292,10 @@ function RecipeUI:updateGridFromInventory()
     local symbolMap = {}
     local nextSymbol = string.byte('A')  -- Start with 'A'
 
-    for slot = 1, 9 do
+    -- Crafting grid slots (skipping fuel slots 4, 5, 9, 10, 14, 15, 16)
+    local craftingSlots = {1, 2, 3, 6, 7, 8, 11, 12, 13}
+
+    for _, slot in ipairs(craftingSlots) do
         local item = turtle.getItemDetail(slot)
 
         if item then
@@ -266,7 +331,7 @@ function RecipeUI:handleTouch(x, y)
     local w, h = term.getSize()
 
     -- Check substitution checkbox
-    if y == h - 5 and x >= 3 and x <= 4 then
+    if y == h - 4 and x >= 2 and x <= 3 then
         self.enableSubstitutions = not self.enableSubstitutions
         self:draw()
         return true
@@ -274,25 +339,25 @@ function RecipeUI:handleTouch(x, y)
 
     if not self.awaitingConfirmation then
         -- Check Craft & Save button
-        if y == h - 2 and x >= 3 and x <= 16 then
+        if y == h - 1 and x >= 2 and x <= 15 then
             self:craftAndSave()
             return true
         end
 
         -- Check Cancel button
-        if y == h - 2 and x >= w - 10 and x <= w - 4 then
+        if y == h - 1 and x >= w - 9 and x <= w - 3 then
             self:exit()
             return true
         end
     else
         -- Check Confirm button
-        if y == h - 2 and x >= 3 and x <= 12 then
+        if y == h - 1 and x >= 2 and x <= 11 then
             self:confirmSave()
             return true
         end
 
         -- Check Discard button
-        if y == h - 2 and x >= w - 11 and x <= w - 4 then
+        if y == h - 1 and x >= w - 10 and x <= w - 3 then
             self:discardRecipe()
             return true
         end
@@ -303,9 +368,10 @@ end
 
 -- Craft and prepare to save
 function RecipeUI:craftAndSave()
-    -- Check if grid has items
+    -- Check if grid has items (check crafting slots only)
+    local craftingSlots = {1, 2, 3, 6, 7, 8, 11, 12, 13}
     local hasItems = false
-    for slot = 1, 9 do
+    for _, slot in ipairs(craftingSlots) do
         if turtle.getItemDetail(slot) then
             hasItems = true
             break
